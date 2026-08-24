@@ -67,7 +67,7 @@ export const CONTROL_PANEL_HTML = `
       <label><input data-remote-permission="record" type="checkbox"> RECORD</label>
       <label><input data-remote-permission="clear" type="checkbox"> CLEAR</label>
     </fieldset>
-    <div class="remote-transport"><span>Transport</span><b data-remote-transport>WebRTC (接続中)</b></div>
+    <div class="remote-transport"><span>Transport</span><b data-remote-transport>WebRTC (未接続)</b></div>
     <div class="remote-stats" data-remote-stats><span>NO CONTROLLERS</span></div>
   </section>
   <div class="panel-actions">

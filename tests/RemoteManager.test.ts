@@ -297,6 +297,6 @@ test("Remote開始時にTURN credential APIを呼ばない", async () => {
   const harness = createHarness();
   await startRemote(harness);
   assert.equal(harness.fetchCalls.some((call) => call.url.endsWith("/ice-servers")), false);
-  assert.equal(harness.ui.transport.textContent, "WebRTC (接続中)");
+  assert.equal(harness.ui.transport.textContent, "WebRTC (未接続)");
   harness.manager.destroy();
 });

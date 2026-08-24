@@ -482,6 +482,7 @@ export class RemoteManager {
       case "controllerConnected":
         this.controllers.add(message.controllerSessionId);
         this.webRtc.controllerConnected(message.controllerSessionId);
+        this.renderConnectionSummary();
         this.renderControllerState();
         return;
       case "controllerDisconnected":
@@ -592,7 +593,8 @@ export class RemoteManager {
   private renderConnectionSummary(): void {
     const anyRtc = [...this.webRtcByController.values()].some(Boolean);
     this.ui.webRtcStatus.textContent = `WebRTC ${anyRtc ? "CONNECTED" : "DISCONNECTED"}`;
-    this.ui.transport.textContent = `WebRTC (${anyRtc ? "DIRECT" : "接続中"})`;
+    const state = anyRtc ? "DIRECT" : this.controllers.size > 0 ? "接続中" : "未接続";
+    this.ui.transport.textContent = `WebRTC (${state})`;
   }
 
   /** controller peerと表示用connection stateをまとめて破棄する */

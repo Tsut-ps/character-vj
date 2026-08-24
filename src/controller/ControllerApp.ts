@@ -67,7 +67,7 @@ export class ControllerApp {
         </div>
         <button class="clear" data-command="clear">CLEAR</button>
         <div class="controller-connection"><span>MODE</span><b>DIRECT</b><b data-webrtc-status>WebRTC DISCONNECTED</b></div>
-        <div class="controller-path"><span>Transport</span><b data-transport>WebRTC (接続中)</b></div>
+        <div class="controller-path"><span>Transport</span><b data-transport>WebRTC (未接続)</b></div>
         <p data-detail></p>
       </section>
     `;
@@ -149,7 +149,7 @@ export class ControllerApp {
   private setWebRtcState(connected: boolean): void {
     this.webRtcConnected = connected;
     this.required<HTMLElement>("[data-webrtc-status]").textContent = `WebRTC ${connected ? "CONNECTED" : "DISCONNECTED"}`;
-    this.required<HTMLElement>("[data-transport]").textContent = `WebRTC (${connected ? "DIRECT" : "接続中"})`;
+    this.required<HTMLElement>("[data-transport]").textContent = `WebRTC (${connected ? "DIRECT" : "未接続"})`;
     if (!connected) this.releaseLocalPointers();
     this.applyDisabledState();
   }
