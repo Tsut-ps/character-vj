@@ -5,7 +5,6 @@ import {
   remoteInitialConnectTimeoutMs,
   remoteSessionTimeoutMs,
   type RemoteCommand,
-  type RemotePath,
   type RemotePermissions,
 } from "../app/remote/RemoteProtocol.ts";
 import { WebSocketTransport, type RemoteTransport } from "../app/remote/WebSocketTransport.ts";
@@ -16,7 +15,7 @@ export interface ControllerConnectionEvents {
   onStatus(status: "joining" | "connecting" | "connected" | "disconnected" | "error", detail?: string): void;
   onPermissions(permissions: RemotePermissions): void;
   onLatency(rttMs: number): void;
-  onWebRtcState(connected: boolean, path: RemotePath): void;
+  onWebRtcState(connected: boolean): void;
 }
 
 /** JOINとWebRTC signalingを管理する */
@@ -35,7 +34,8 @@ export class ControllerConnection {
     this.events = events;
     this.webRtc = new WebRtcController({
       sendSignal: (message) => this.transport?.send(message) ?? false,
-      onState: (connected, path) => this.events.onWebRtcState(connected, path),
+      onState: (connected) => this.events.onWebRtcState(connected),
+      onLatency: (rttMs) => this.events.onLatency(rttMs),
     });
     this.commands = new ControllerCommandSender((envelope) => this.webRtc.send(envelope));
   }
@@ -80,7 +80,6 @@ export class ControllerConnection {
       baseUrl: this.baseUrl,
       roomId,
       sessionTicket,
-      autoReconnect: false,
       events: {
         onOpen: () => this.events.onStatus("connecting"),
         onClose: (event) => {
@@ -146,11 +145,6 @@ export class ControllerConnection {
       this.commands.setPermissions(message.permissions);
       this.events.onPermissions(message.permissions);
       this.events.onStatus("connected");
-    } else if (message.type === "permissions") {
-      this.commands.setPermissions(message.permissions);
-      this.events.onPermissions(message.permissions);
-    } else if (message.type === "latency") {
-      this.events.onLatency(message.rttMs);
     } else if (message.type === "rtcOffer" && message.controllerSessionId === this.controllerSessionId) {
       void this.webRtc.handleOffer(message);
     } else if (message.type === "rtcIceCandidate" && message.controllerSessionId === this.controllerSessionId) {

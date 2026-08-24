@@ -8,7 +8,6 @@ import {
   parseServerMessage,
   remoteSessionTimeoutMs,
   type HostClientMessage,
-  type RemotePath,
   type RemotePermissions,
   type ServerMessage,
 } from "./RemoteProtocol.ts";
@@ -35,11 +34,6 @@ interface ReadyWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
-}
-
-interface ControllerWebRtcState {
-  connected: boolean;
-  path: RemotePath;
 }
 
 export interface RemoteManagerDependencies {
@@ -75,10 +69,7 @@ export class RemoteManager {
   private destroyed = false;
   private readonly controllers = new Set<string>();
   private readonly rttByController = new Map<string, number>();
-  private readonly webRtcByController = new Map<
-    string,
-    ControllerWebRtcState
-  >();
+  private readonly webRtcByController = new Map<string, boolean>();
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -121,8 +112,8 @@ export class RemoteManager {
     const webRtcEvents: WebRtcHostEvents = {
       sendSignal: (message) => this.transport?.send(message) ?? false,
       onEnvelope: (controllerSessionId, envelope) => this.adapter.handle(controllerSessionId, envelope),
-      onState: (controllerSessionId, connected, path) =>
-        this.handleWebRtcState(controllerSessionId, connected, path),
+      onState: (controllerSessionId, connected) =>
+        this.handleWebRtcState(controllerSessionId, connected),
       onLatency: (controllerSessionId, rttMs) =>
         this.handleWebRtcLatency(controllerSessionId, rttMs),
     };
@@ -145,7 +136,7 @@ export class RemoteManager {
     for (const input of Object.values(this.ui.permissionInputs)) {
       input.addEventListener(
         "change",
-        () => void this.updatePermissionsFromUi(),
+        () => this.updatePermissionsFromUi(),
         { signal },
       );
     }
@@ -184,6 +175,7 @@ export class RemoteManager {
     if (this.destroyed || !this.baseUrl || this.session || this.transport)
       return;
     this.ui.startButton.disabled = true;
+    this.setPermissionInputsDisabled(true);
     this.ui.status.textContent = "STARTING";
     try {
       await this.ensureSession();
@@ -283,7 +275,7 @@ export class RemoteManager {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: "{}",
+        body: JSON.stringify({ permissions: this.permissions }),
       },
     );
     if (!response.ok)
@@ -306,7 +298,6 @@ export class RemoteManager {
       baseUrl: this.baseUrl,
       roomId: this.session.roomId,
       sessionTicket,
-      autoReconnect: false,
       events: {
         onOpen: () => {
           if (this.transport === transport)
@@ -419,6 +410,7 @@ export class RemoteManager {
     this.ui.status.textContent = status;
     this.ui.startButton.disabled = !this.baseUrl;
     this.ui.showQrButton.disabled = true;
+    this.setPermissionInputsDisabled(false);
   }
 
   private handleMessage(data: unknown): void {
@@ -515,38 +507,16 @@ export class RemoteManager {
     }
   }
 
-  private async updatePermissionsFromUi(): Promise<void> {
-    const next: RemotePermissions = {
+  /** session開始前のpermissionだけをlocal stateへ反映する */
+  private updatePermissionsFromUi(): void {
+    if (this.session) return;
+    this.permissions = {
       cue: this.ui.permissionInputs.cue.checked,
       tapSync: this.ui.permissionInputs.tapSync.checked,
       record: this.ui.permissionInputs.record.checked,
       clear: this.ui.permissionInputs.clear.checked,
     };
-    if (!this.ready) {
-      this.permissions = next;
-      this.adapter.setPermissions(next);
-      return;
-    }
-    const previous = this.permissions;
-    this.permissions = next;
-    this.adapter.setPermissions(next);
-    try {
-      const ack = await this.request({
-        v: 1,
-        type: "setPermissions",
-        requestId: crypto.randomUUID(),
-        permissions: next,
-      });
-      if (!ack.ok) throw new Error(ack.error ?? "Permission update failed");
-      this.log("REMOTE PERMISSIONS UPDATED");
-    } catch (error) {
-      this.permissions = previous;
-      this.adapter.setPermissions(previous);
-      this.syncPermissionInputs();
-      this.log(
-        `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote permission error"}`,
-      );
-    }
+    this.adapter.setPermissions(this.permissions);
   }
 
   private request(
@@ -589,21 +559,14 @@ export class RemoteManager {
 
   private setLatency(controllerSessionId: string, rttMs: number): void {
     this.rttByController.set(controllerSessionId, rttMs);
-    this.transport?.send({
-      v: 1,
-      type: "latency",
-      controllerSessionId,
-      rttMs,
-    });
     this.renderControllerState();
   }
 
   private handleWebRtcState(
     controllerSessionId: string,
     connected: boolean,
-    path: RemotePath,
   ): void {
-    this.webRtcByController.set(controllerSessionId, { connected, path });
+    this.webRtcByController.set(controllerSessionId, connected);
     if (!connected) this.adapter.releaseController(controllerSessionId);
     this.renderConnectionSummary();
     this.renderControllerState();
@@ -619,30 +582,17 @@ export class RemoteManager {
       ...[...this.controllers].map((id, index) => {
         const row = document.createElement("div");
         const rtt = this.rttByController.get(id);
-        const rtc = this.webRtcByController.get(id);
-        const path = this.controllerPath(rtc);
-        row.innerHTML = `<b>#${index + 1}</b><span>${path}</span><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span><span>One-way ${rtt === undefined ? "—" : `~${Math.round(rtt / 2)} ms`}</span>`;
+        const connected = this.webRtcByController.get(id) === true;
+        row.innerHTML = `<b>#${index + 1}</b><span>WebRTC (${connected ? "DIRECT" : "接続中"})</span><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span>`;
         return row;
       }),
     );
   }
 
-  private controllerPath(rtc?: ControllerWebRtcState): RemotePath {
-    return rtc?.path ?? "UNKNOWN";
-  }
-
   private renderConnectionSummary(): void {
-    const paths = [...this.controllers].map((id) =>
-      this.controllerPath(this.webRtcByController.get(id)),
-    );
-    const unique = new Set(paths);
-    const path = unique.size === 0 ? "UNKNOWN" : unique.size === 1 ? paths[0]! : "MIXED";
-    const anyRtc = [...this.webRtcByController.values()].some(
-      (state) => state.connected,
-    );
+    const anyRtc = [...this.webRtcByController.values()].some(Boolean);
     this.ui.webRtcStatus.textContent = `WebRTC ${anyRtc ? "CONNECTED" : "DISCONNECTED"}`;
-    this.ui.transport.textContent = "WebRTC";
-    this.ui.path.textContent = path;
+    this.ui.transport.textContent = `WebRTC (${anyRtc ? "DIRECT" : "接続中"})`;
   }
 
   /** controller peerと表示用connection stateをまとめて破棄する */
@@ -660,6 +610,11 @@ export class RemoteManager {
     this.ui.permissionInputs.tapSync.checked = this.permissions.tapSync;
     this.ui.permissionInputs.record.checked = this.permissions.record;
     this.ui.permissionInputs.clear.checked = this.permissions.clear;
+  }
+
+  /** permission入力のsession中変更を防ぐ */
+  private setPermissionInputsDisabled(disabled: boolean): void {
+    for (const input of Object.values(this.ui.permissionInputs)) input.disabled = disabled;
   }
 
   private hideQrView(): void {

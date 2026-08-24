@@ -2,7 +2,7 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, createSecretToken, hashToken } from "../src/auth";
 import type { Room } from "../src/Room";
-import { MAX_CONTROLLER_SESSIONS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
+import { DEFAULT_PERMISSIONS, MAX_CONTROLLER_SESSIONS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
 
 interface Fixture {
   roomId: string;
@@ -23,6 +23,7 @@ async function createFixture(ttlMs = 60_000): Promise<Fixture> {
     await hashToken(hostToken),
     await hashToken(hostTicket),
     expiresAt,
+    DEFAULT_PERMISSIONS,
   );
   expect(initialized).toBe(true);
   return { roomId, hostToken, hostTicket, expiresAt, stub };
@@ -202,11 +203,6 @@ describe("Room secret and ticket lifecycle", () => {
     await runInDurableObject(fixture.stub, (_instance, state) => {
       for (let index = 0; index < MAX_CONTROLLER_SESSIONS; index += 1) {
         const sessionId = crypto.randomUUID();
-        state.storage.sql.exec(
-          "INSERT INTO controllers (session_id, current_connection_id, created_at) VALUES (?, NULL, ?)",
-          sessionId,
-          Date.now(),
-        );
         state.storage.sql.exec(
           "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'controller', ?, ?)",
           `ticket-${index}`,

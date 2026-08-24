@@ -1,6 +1,5 @@
 import {
   DEFAULT_REMOTE_PERMISSIONS,
-  type RemotePath,
   type RemotePermissions,
 } from "../app/remote/RemoteProtocol.ts";
 import { ControllerConnection } from "./ControllerConnection.ts";
@@ -25,7 +24,7 @@ export class ControllerApp {
       onStatus: (status, detail) => this.setStatus(status, detail),
       onPermissions: (permissions) => this.setPermissions(permissions),
       onLatency: (rttMs) => this.setLatency(rttMs),
-      onWebRtcState: (connected, path) => this.setWebRtcState(connected, path),
+      onWebRtcState: (connected) => this.setWebRtcState(connected),
     });
     this.bindControls();
   }
@@ -68,7 +67,7 @@ export class ControllerApp {
         </div>
         <button class="clear" data-command="clear">CLEAR</button>
         <div class="controller-connection"><span>MODE</span><b>DIRECT</b><b data-webrtc-status>WebRTC DISCONNECTED</b></div>
-        <div class="controller-path"><span>Transport</span><b>WebRTC</b><span>Path</span><b data-path>UNKNOWN</b></div>
+        <div class="controller-path"><span>Transport</span><b data-transport>WebRTC (接続中)</b></div>
         <p data-detail></p>
       </section>
     `;
@@ -147,10 +146,10 @@ export class ControllerApp {
     this.required<HTMLElement>("[data-latency]").textContent = `${Math.round(rttMs)} ms`;
   }
 
-  private setWebRtcState(connected: boolean, path: RemotePath): void {
+  private setWebRtcState(connected: boolean): void {
     this.webRtcConnected = connected;
     this.required<HTMLElement>("[data-webrtc-status]").textContent = `WebRTC ${connected ? "CONNECTED" : "DISCONNECTED"}`;
-    this.required<HTMLElement>("[data-path]").textContent = path;
+    this.required<HTMLElement>("[data-transport]").textContent = `WebRTC (${connected ? "DIRECT" : "接続中"})`;
     if (!connected) this.releaseLocalPointers();
     this.applyDisabledState();
   }

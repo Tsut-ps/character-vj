@@ -15,7 +15,6 @@ import {
   SESSION_TICKET_TTL_MS,
   signalingMessageSchema,
   signalingPayloadWithinLimit,
-  type HostMessage,
   type Permissions,
 } from "./protocol";
 import { checkCommandRate } from "./rateLimit";
@@ -70,7 +69,7 @@ export class Room extends Server<Env> {
   private currentHostConnectionId: string | null = null;
   private readonly currentControllerConnections = new Map<string, string>();
 
-  /** PartyServer起動時にschemaとroom期限を復元する */
+  /** PartyServer起動時にschemaと接続attachmentを復元する */
   async onStart(): Promise<void> {
     this.ensureSchema();
     if (!await this.ctx.storage.get<boolean>("initialized")) return;
@@ -82,16 +81,15 @@ export class Room extends Server<Env> {
     }
     this.currentHostConnectionId = room.current_host_connection_id;
     this.currentControllerConnections.clear();
-    for (const row of this.ctx.storage.sql.exec<{ session_id: string; current_connection_id: string }>(
-      "SELECT session_id, current_connection_id FROM controllers WHERE current_connection_id IS NOT NULL",
-    )) {
-      this.currentControllerConnections.set(row.session_id, row.current_connection_id);
+    for (const connection of this.getConnections<RemoteConnectionState>("role:controller")) {
+      const controllerSessionId = connection.state?.controllerSessionId;
+      if (controllerSessionId) this.currentControllerConnections.set(controllerSessionId, connection.id);
     }
     await this.scheduleSessionAlarm(room.expires_at);
   }
 
   /** 新規roomのhashと絶対期限を保存する */
-  async initializeRoom(hostTokenHash: string, ticketHash: string, expiresAt: number): Promise<boolean> {
+  async initializeRoom(hostTokenHash: string, ticketHash: string, expiresAt: number, permissions: Permissions): Promise<boolean> {
     if (await this.ctx.storage.get<boolean>("initialized")) return false;
     const now = Date.now();
     const roomExpiresAt = Math.min(expiresAt, now + SESSION_TICKET_TTL_MS);
@@ -102,7 +100,7 @@ export class Room extends Server<Env> {
     this.ctx.storage.sql.exec(
       "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?, ?)",
       hostTokenHash,
-      JSON.stringify(DEFAULT_PERMISSIONS),
+      JSON.stringify(permissions),
       now,
       roomExpiresAt,
     );
@@ -154,16 +152,10 @@ export class Room extends Server<Env> {
     if (!Number.isSafeInteger(expiresAt) || sessionExpiresAt <= now) return { ok: false, reason: "forbidden" };
     const inserted = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at <= ?", now);
-      this.ctx.storage.sql.exec(
-        "DELETE FROM controllers WHERE current_connection_id IS NULL AND session_id NOT IN (SELECT controller_session_id FROM tickets WHERE controller_session_id IS NOT NULL)",
-      );
-      const controllerCount = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM controllers").one().count;
+      const controllerCount = this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM tickets WHERE role = 'controller'",
+      ).one().count;
       if (controllerCount >= MAX_CONTROLLER_SESSIONS) return false;
-      this.ctx.storage.sql.exec(
-        "INSERT INTO controllers (session_id, current_connection_id, created_at) VALUES (?, NULL, ?)",
-        controllerSessionId,
-        now,
-      );
       this.ctx.storage.sql.exec(
         "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'controller', ?, ?)",
         ticketHash,
@@ -195,11 +187,6 @@ export class Room extends Server<Env> {
     if (!row || row.expires_at <= now || room.expires_at <= now) return { ok: false };
     if (row.role === "controller") {
       if (!row.controller_session_id) return { ok: false };
-      const controller = this.ctx.storage.sql.exec<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM controllers WHERE session_id = ?",
-        row.controller_session_id,
-      ).one();
-      if (controller.count !== 1) return { ok: false };
     }
     return {
       ok: true,
@@ -309,7 +296,6 @@ export class Room extends Server<Env> {
     if (!state.controllerSessionId) return;
     if (this.currentControllerConnections.get(state.controllerSessionId) !== connection.id) return;
     this.currentControllerConnections.delete(state.controllerSessionId);
-    this.ctx.storage.sql.exec("UPDATE controllers SET current_connection_id = NULL WHERE session_id = ?", state.controllerSessionId);
     this.sendToHosts({ v: 1, type: "controllerDisconnected", controllerSessionId: state.controllerSessionId });
   }
 
@@ -367,32 +353,21 @@ export class Room extends Server<Env> {
     );
     activeControllers.add(controllerSessionId);
     if (activeControllers.size > MAX_ACTIVE_CONTROLLERS) return false;
-    const row = this.ctx.storage.sql.exec<{ current_connection_id: string | null }>(
-      "SELECT current_connection_id FROM controllers WHERE session_id = ?",
-      controllerSessionId,
-    ).toArray()[0];
-    if (!row) return false;
+    const previousConnectionId = this.currentControllerConnections.get(controllerSessionId);
     this.currentControllerConnections.set(controllerSessionId, connection.id);
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(
-        "UPDATE controllers SET current_connection_id = ? WHERE session_id = ?",
-        connection.id,
-        controllerSessionId,
-      );
-      this.ctx.storage.sql.exec(
-        "UPDATE tickets SET expires_at = ? WHERE role = 'controller' AND controller_session_id = ?",
-        sessionExpiresAt,
-        controllerSessionId,
-      );
-    });
-    if (row.current_connection_id && row.current_connection_id !== connection.id) {
-      this.getConnection(row.current_connection_id)?.close(4002, "Controller reconnected");
+    this.ctx.storage.sql.exec(
+      "UPDATE tickets SET expires_at = ? WHERE role = 'controller' AND controller_session_id = ?",
+      sessionExpiresAt,
+      controllerSessionId,
+    );
+    if (previousConnectionId && previousConnectionId !== connection.id) {
+      this.getConnection(previousConnectionId)?.close(4002, "Controller reconnected");
     }
     this.sendToHosts({ v: 1, type: "controllerConnected", controllerSessionId });
     return true;
   }
 
-  /** host専用controlを処理しcontrollerへ権限をserver側から配布する */
+  /** host専用controlとWebRTC signalingだけを処理する */
   private async handleHostMessage(connection: Connection<RemoteConnectionState>, candidate: unknown): Promise<void> {
     if (this.currentHostConnectionId !== connection.id) {
       connection.close(4001, "Host replaced");
@@ -404,7 +379,7 @@ export class Room extends Server<Env> {
       return;
     }
     const message = result.data;
-    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "setPermissions" || message.type === "requestState") {
+    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "requestState") {
       const rate = checkCommandRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
       this.hostControlRate = rate.state;
       if (!rate.allowed) {
@@ -414,14 +389,11 @@ export class Room extends Server<Env> {
     }
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
-    else if (message.type === "setPermissions") this.setPermissions(connection, message);
     else if (message.type === "requestState") {
       this.sendAck(connection, message.requestId, message.type, true);
       this.sendState(connection);
     } else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
       this.sendToController(message.controllerSessionId, message);
-    } else if (message.type === "latency") {
-      this.sendToController(message.controllerSessionId, { v: 1, type: "latency", rttMs: message.rttMs });
     }
   }
 
@@ -463,19 +435,6 @@ export class Room extends Server<Env> {
     this.sendState(connection);
   }
 
-  /** permissionsを永続化し全controller attachmentとUIへ反映する */
-  private setPermissions(connection: Connection<RemoteConnectionState>, message: Extract<HostMessage, { type: "setPermissions" }>): void {
-    this.ctx.storage.sql.exec(
-      "UPDATE room_state SET permissions_json = ? WHERE singleton = 1",
-      JSON.stringify(message.permissions),
-    );
-    for (const controller of this.getConnections<RemoteConnectionState>("role:controller")) {
-      this.send(controller, { v: 1, type: "permissions", permissions: message.permissions });
-    }
-    this.sendAck(connection, message.requestId, message.type, true);
-    this.sendState(connection);
-  }
-
   /** hostへ現在のjoin、permissions、controller一覧を送る */
   private sendState(connection: Connection): void {
     const room = this.getRoom();
@@ -496,7 +455,7 @@ export class Room extends Server<Env> {
   private sendAck(
     connection: Connection,
     requestId: string,
-    action: "openJoin" | "closeJoin" | "setPermissions" | "requestState",
+    action: "openJoin" | "closeJoin" | "requestState",
     ok: boolean,
     joinSecret?: string,
   ): void {
@@ -607,11 +566,6 @@ export class Room extends Server<Env> {
         expires_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS tickets_expires_at ON tickets(expires_at);
-      CREATE TABLE IF NOT EXISTS controllers (
-        session_id TEXT PRIMARY KEY,
-        current_connection_id TEXT,
-        created_at INTEGER NOT NULL
-      );
       CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
         id INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL DEFAULT (datetime('now'))

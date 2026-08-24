@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { createSecretToken, hashToken } from "../src/auth";
+import { DEFAULT_PERMISSIONS } from "../src/protocol";
 
 /** WebSocket closeをtimeout付きで待つ */
 function waitForClose(socket: WebSocket): Promise<CloseEvent> {
@@ -51,7 +52,7 @@ describe("Worker edge security", () => {
     const response = await SELF.fetch("https://worker.test/v1/rooms", {
       method: "POST",
       headers: { Origin: "https://tsut-ps.github.io", "content-type": "application/json" },
-      body: "{}",
+      body: JSON.stringify({ permissions: DEFAULT_PERMISSIONS }),
     });
     expect(response.status).toBe(201);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
@@ -129,6 +130,7 @@ describe("Worker edge security", () => {
       await hashToken(hostToken),
       await hashToken(sessionTicket),
       expiresAt,
+      DEFAULT_PERMISSIONS,
     );
     const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, {
       headers: {
@@ -154,6 +156,7 @@ describe("Worker edge security", () => {
       await hashToken(hostToken),
       await hashToken(sessionTicket),
       Date.now() + 60_000,
+      DEFAULT_PERMISSIONS,
     );
     const headers = {
       Origin: "https://tsut-ps.github.io",
@@ -179,7 +182,7 @@ describe("Worker edge security", () => {
     const controllerSessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 5 * 60_000;
     const stub = env.Room.getByName(roomId);
-    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt, DEFAULT_PERMISSIONS);
     const joinSecret = createSecretToken();
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
@@ -210,13 +213,6 @@ describe("Worker edge security", () => {
     const disconnected = waitForMessage(host, (message) => message.type === "controllerDisconnected");
     controller.close(1000, "done");
     await disconnected;
-    await runInDurableObject(stub, (_instance, state) => {
-      const row = state.storage.sql.exec<{ current_connection_id: string | null }>(
-        "SELECT current_connection_id FROM controllers WHERE session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(row.current_connection_id).toBeNull();
-    });
     host.close(1000, "done");
   });
 
@@ -228,7 +224,7 @@ describe("Worker edge security", () => {
     const controllerSessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 60_000;
     const stub = env.Room.getByName(roomId);
-    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt, DEFAULT_PERMISSIONS);
     const joinSecret = createSecretToken();
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
@@ -295,6 +291,7 @@ describe("Worker edge security", () => {
       await hashToken(hostToken),
       await hashToken(hostTicket),
       Date.now() + 60_000,
+      DEFAULT_PERMISSIONS,
     );
     const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
     const host = response.webSocket!;

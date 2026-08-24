@@ -53,8 +53,6 @@ export const remoteEnvelopeSchema = z.object({
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 export type RemoteEnvelope = z.infer<typeof remoteEnvelopeSchema>;
 
-export type RemotePath = "DIRECT" | "UNKNOWN";
-
 const rtcSdpSchema = z.string().min(1).max(20_000);
 const rtcSessionIdSchema = z.string().uuid();
 const rtcIceCandidateSchema = z.object({
@@ -73,12 +71,6 @@ export type ControllerRtcSignal =
 const hostClientMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
-  z.object({
-    v: z.literal(1),
-    type: z.literal("setPermissions"),
-    requestId: z.string().uuid(),
-    permissions: remotePermissionsSchema,
-  }).strict(),
   z.object({ v: z.literal(1), type: z.literal("requestState"), requestId: z.string().uuid() }).strict(),
   z.object({
     v: z.literal(1),
@@ -93,12 +85,6 @@ const hostClientMessageSchema = z.discriminatedUnion("type", [
     controllerSessionId: z.string().uuid(),
     rtcSessionId: rtcSessionIdSchema,
     candidate: rtcIceCandidateSchema,
-  }).strict(),
-  z.object({
-    v: z.literal(1),
-    type: z.literal("latency"),
-    controllerSessionId: z.string().uuid(),
-    rttMs: z.number().finite().nonnegative().max(60_000),
   }).strict(),
 ]);
 
@@ -119,7 +105,7 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("hostAck"),
     requestId: z.string().uuid(),
-    action: z.enum(["openJoin", "closeJoin", "setPermissions", "requestState"]),
+    action: z.enum(["openJoin", "closeJoin", "requestState"]),
     ok: z.boolean(),
     joinSecret: z.string().min(32).max(256).optional(),
     error: z.string().max(160).optional(),
@@ -129,7 +115,7 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("state"),
     joinOpen: z.boolean(),
     permissions: remotePermissionsSchema,
-    controllers: z.array(controllerSummarySchema).max(500),
+    controllers: z.array(controllerSummarySchema).max(20),
   }).strict(),
   z.object({
     v: z.literal(1),
@@ -141,7 +127,6 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("controllerDisconnected"),
     controllerSessionId: z.string().uuid(),
   }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("permissions"), permissions: remotePermissionsSchema }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("rtcOffer"),
@@ -163,7 +148,6 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     rtcSessionId: rtcSessionIdSchema,
     candidate: rtcIceCandidateSchema,
   }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("latency"), rttMs: z.number().finite().nonnegative().max(60_000) }).strict(),
   z.object({ v: z.literal(1), type: z.literal("error"), code: z.string().max(64), message: z.string().max(160) }).strict(),
 ]);
 
@@ -199,6 +183,7 @@ const rtcDataMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("remote"), envelope: remoteEnvelopeSchema }).strict(),
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.string().uuid() }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("latency"), rttMs: z.number().finite().nonnegative().max(60_000) }).strict(),
 ]);
 export type RtcDataMessage = z.infer<typeof rtcDataMessageSchema>;
 

@@ -3,7 +3,6 @@ import {
   type HostClientMessage,
   type RemoteEnvelope,
   type RemoteIceCandidate,
-  type RemotePath,
   type ServerMessage,
 } from "./RemoteProtocol.ts";
 import {
@@ -33,7 +32,7 @@ interface HostPeer {
 export interface WebRtcHostEvents {
   sendSignal(message: HostClientMessage): boolean;
   onEnvelope(controllerSessionId: string, envelope: RemoteEnvelope): void;
-  onState(controllerSessionId: string, connected: boolean, path: RemotePath): void;
+  onState(controllerSessionId: string, connected: boolean): void;
   onLatency(controllerSessionId: string, rttMs: number): void;
 }
 
@@ -215,10 +214,13 @@ export class WebRtcHost implements RemoteWebRtcHost {
       this.sendData(peer, { v: 1, type: "pong", nonce: message.nonce });
       return;
     }
+    if (message.type !== "pong") return;
     const sentAt = peer.pendingPings.get(message.nonce);
     if (sentAt === undefined) return;
     peer.pendingPings.delete(message.nonce);
-    this.events.onLatency(controllerSessionId, Math.max(0, performance.now() - sentAt));
+    const rttMs = Math.max(0, performance.now() - sentAt);
+    this.events.onLatency(controllerSessionId, rttMs);
+    this.sendData(peer, { v: 1, type: "latency", rttMs });
   }
 
   /** schema検証前に過剰なDataChannel frameを落とす */
@@ -258,7 +260,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
   private setConnected(controllerSessionId: string, peer: HostPeer, connected: boolean): void {
     if (this.peers.get(controllerSessionId) !== peer || peer.connected === connected) return;
     peer.connected = connected;
-    this.events.onState(controllerSessionId, connected, connected ? "DIRECT" : "UNKNOWN");
+    this.events.onState(controllerSessionId, connected);
   }
 
   private handleConnectionState(controllerSessionId: string, peer: HostPeer): void {
@@ -276,7 +278,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
     if (!peer) return;
     this.peers.delete(controllerSessionId);
     if (peer.pingTimer !== null) clearInterval(peer.pingTimer);
-    if (peer.connected) this.events.onState(controllerSessionId, false, "UNKNOWN");
+    if (peer.connected) this.events.onState(controllerSessionId, false);
     try { peer.channel.close(); } catch { /* noop */ }
     try { peer.connection.close(); } catch { /* noop */ }
   }

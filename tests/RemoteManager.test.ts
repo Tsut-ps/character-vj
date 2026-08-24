@@ -3,7 +3,7 @@ import test from "node:test";
 import { RemoteInputAdapter } from "../src/app/remote/RemoteInputAdapter.ts";
 import { RemoteManager } from "../src/app/remote/RemoteManager.ts";
 import type { RemoteTransport, WebSocketTransportOptions } from "../src/app/remote/WebSocketTransport.ts";
-import type { RemoteEnvelope, RemotePath, ServerMessage } from "../src/app/remote/RemoteProtocol.ts";
+import type { RemoteEnvelope, ServerMessage } from "../src/app/remote/RemoteProtocol.ts";
 import type { RemoteWebRtcHost, WebRtcHostEvents } from "../src/app/remote/WebRtcHost.ts";
 import type { AppAction } from "../src/app/types.ts";
 import type { RemoteHostElements } from "../src/app/ui/createVjUi.ts";
@@ -92,8 +92,8 @@ class FakeWebRtcHost implements RemoteWebRtcHost {
     this.events.onEnvelope(controllerSessionId, envelope);
   }
 
-  state(controllerSessionId: string, connected: boolean, path: RemotePath = "DIRECT"): void {
-    this.events.onState(controllerSessionId, connected, path);
+  state(controllerSessionId: string, connected: boolean): void {
+    this.events.onState(controllerSessionId, connected);
   }
 
   latency(controllerSessionId: string, rttMs: number): void {
@@ -132,7 +132,6 @@ function createRemoteUi(): RemoteHostElements {
     showQrButton: fakeElement<HTMLButtonElement>(),
     webRtcStatus: fakeElement<HTMLElement>(),
     transport: fakeElement<HTMLElement>(),
-    path: fakeElement<HTMLElement>(),
     permissionInputs: {
       cue: fakeElement<HTMLInputElement>(),
       tapSync: fakeElement<HTMLInputElement>(),
@@ -210,6 +209,11 @@ async function startRemote(harness: ManagerHarness): Promise<FakeTransport> {
   harness.ui.startButton.dispatchEvent(new Event("click"));
   await waitFor(() => harness.transports.length === 1);
   const transport = harness.transports[0];
+  const createCall = harness.fetchCalls.find((call) => new URL(call.url).pathname === "/v1/rooms");
+  assert.deepEqual(JSON.parse(String(createCall?.init?.body)), {
+    permissions: { cue: true, tapSync: false, record: false, clear: false },
+  });
+  assert.equal(harness.ui.permissionInputs.cue.disabled, true);
   transport.receive({
     v: 1,
     type: "ready",
@@ -259,7 +263,6 @@ test("Host切断時はmemory上のtokenからticketを再発行する", async ()
   if (!reconnectCall) throw new Error("Host ticket refresh was not requested");
   assert.deepEqual(JSON.parse(String(reconnectCall.init?.body)), { hostToken: HOST_TOKEN });
   assert.equal(harness.transports[1].options.sessionTicket, SECOND_TICKET);
-  assert.equal(harness.transports[1].options.autoReconnect, false);
   harness.manager.destroy();
 });
 
@@ -281,8 +284,8 @@ test("DIRECT peer切断時にControllerのdown中Cueを解放する", async () =
   const harness = createHarness();
   await startRemote(harness);
   harness.webRtc.receive(CONTROLLER_ID, { v: 1, seq: 0, command: { type: "cue", cue: 4, state: "down" } });
-  harness.webRtc.state(CONTROLLER_ID, true, "DIRECT");
-  harness.webRtc.state(CONTROLLER_ID, false, "DIRECT");
+  harness.webRtc.state(CONTROLLER_ID, true);
+  harness.webRtc.state(CONTROLLER_ID, false);
   harness.manager.destroy();
   assert.deepEqual(
     harness.actions.map((action) => action.type === "cue" ? [action.cue, action.phase] : null),
@@ -294,6 +297,6 @@ test("Remote開始時にTURN credential APIを呼ばない", async () => {
   const harness = createHarness();
   await startRemote(harness);
   assert.equal(harness.fetchCalls.some((call) => call.url.endsWith("/ice-servers")), false);
-  assert.equal(harness.ui.transport.textContent, "WebRTC");
+  assert.equal(harness.ui.transport.textContent, "WebRTC (接続中)");
   harness.manager.destroy();
 });

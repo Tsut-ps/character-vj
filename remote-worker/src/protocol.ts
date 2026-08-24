@@ -5,8 +5,8 @@ export const MAX_CLIENT_MESSAGE_BYTES = 1024;
 export const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
 export const SESSION_TICKET_TTL_MS = 60 * 60 * 1000;
 export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
-export const MAX_CONTROLLER_SESSIONS = 200;
-export const MAX_ACTIVE_CONTROLLERS = 100;
+export const MAX_CONTROLLER_SESSIONS = 40;
+export const MAX_ACTIVE_CONTROLLERS = 20;
 export const MAX_HOST_MESSAGES_PER_SECOND = 300;
 export const MAX_HOST_CONTROL_MESSAGES_PER_MINUTE = 30;
 
@@ -70,16 +70,9 @@ export const controllerMessageSchema = z.union([
 export const hostMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("setPermissions"), requestId: z.string().uuid(), permissions: permissionsSchema }).strict(),
   z.object({ v: z.literal(1), type: z.literal("requestState"), requestId: z.string().uuid() }).strict(),
   hostRtcOfferSchema,
   hostRtcCandidateSchema,
-  z.object({
-    v: z.literal(1),
-    type: z.literal("latency"),
-    controllerSessionId: z.string().uuid(),
-    rttMs: z.number().finite().nonnegative().max(60_000),
-  }).strict(),
 ]);
 
 export type HostMessage = z.infer<typeof hostMessageSchema>;
@@ -91,6 +84,7 @@ export const signalingMessageSchema = z.union([
   hostRtcCandidateSchema,
 ]);
 
+export const createRoomRequestSchema = z.object({ permissions: permissionsSchema }).strict();
 export const joinRequestSchema = z.object({ joinSecret: z.string().min(32).max(256) }).strict();
 export const hostTicketRequestSchema = z.object({ hostToken: z.string().min(32).max(256) }).strict();
 export const roomIdSchema = z.string().uuid();

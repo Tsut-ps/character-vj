@@ -3,7 +3,6 @@ import {
   type ControllerRtcSignal,
   type RemoteEnvelope,
   type RemoteIceCandidate,
-  type RemotePath,
   type ServerMessage,
 } from "../app/remote/RemoteProtocol.ts";
 import {
@@ -17,7 +16,8 @@ const MAX_RTC_MESSAGES_PER_SECOND = 120;
 
 export interface WebRtcControllerEvents {
   sendSignal(message: ControllerRtcSignal): boolean;
-  onState(connected: boolean, path: RemotePath): void;
+  onState(connected: boolean): void;
+  onLatency(rttMs: number): void;
 }
 
 /** Controller側の単一Host peerとDataChannelを管理する */
@@ -124,6 +124,7 @@ export class WebRtcController {
     const message = parseRtcDataMessage(data);
     if (!message) return;
     if (message.type === "ping") this.sendData({ v: 1, type: "pong", nonce: message.nonce });
+    else if (message.type === "latency") this.events.onLatency(message.rttMs);
   }
 
   /** schema検証前に過剰なDataChannel frameを落とす */
@@ -174,7 +175,7 @@ export class WebRtcController {
   private setConnected(connected: boolean): void {
     if (this.connected === connected) return;
     this.connected = connected;
-    this.events.onState(connected, connected ? "DIRECT" : "UNKNOWN");
+    this.events.onState(connected);
   }
 
   private async flushRemoteCandidates(connection: RTCPeerConnection): Promise<void> {
@@ -196,6 +197,6 @@ export class WebRtcController {
     this.connection = null;
     try { channel?.close(); } catch { /* noop */ }
     try { connection?.close(); } catch { /* noop */ }
-    if (wasConnected) this.events.onState(false, "UNKNOWN");
+    if (wasConnected) this.events.onState(false);
   }
 }

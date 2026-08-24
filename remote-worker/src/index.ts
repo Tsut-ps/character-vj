@@ -2,7 +2,7 @@ import { Hono, type Context, type Next } from "hono";
 import { partyserverMiddleware } from "hono-party";
 import { createSecretToken, hashToken } from "./auth";
 import { Room } from "./Room";
-import { hostTicketRequestSchema, joinRequestSchema, roomIdSchema, SESSION_TICKET_TTL_MS } from "./protocol";
+import { createRoomRequestSchema, hostTicketRequestSchema, joinRequestSchema, roomIdSchema, SESSION_TICKET_TTL_MS } from "./protocol";
 
 type AppEnv = { Bindings: Env };
 
@@ -122,13 +122,15 @@ app.post("/v1/rooms", async (c) => {
   if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "origin_forbidden" }, 403);
   const rate = await c.env.ROOM_CREATE_RATE_LIMITER.limit({ key: `create:${requestIp(c.req.raw)}` });
   if (!rate.success) return c.json({ error: "rate_limited" }, 429);
+  const body = createRoomRequestSchema.safeParse(await readSmallJson(c.req.raw));
+  if (!body.success) return c.json({ error: "invalid_request" }, 400);
 
   const roomId = crypto.randomUUID();
   const hostToken = createSecretToken();
   const sessionTicket = createSecretToken();
   const expiresAt = Date.now() + SESSION_TICKET_TTL_MS;
   const stub = c.env.Room.getByName(roomId);
-  const initialized = await stub.initializeRoom(await hashToken(hostToken), await hashToken(sessionTicket), expiresAt);
+  const initialized = await stub.initializeRoom(await hashToken(hostToken), await hashToken(sessionTicket), expiresAt, body.data.permissions);
   if (!initialized) return c.json({ error: "room_collision" }, 409);
   return c.json({ v: 1, roomId, hostToken, sessionTicket, expiresAt }, 201);
 });
