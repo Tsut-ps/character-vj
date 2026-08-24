@@ -13,8 +13,9 @@ export interface RemoteHostElements {
   join: HTMLElement;
   startButton: HTMLButtonElement;
   showQrButton: HTMLButtonElement;
-  webRtcStatus: HTMLElement;
+  sessionActions: HTMLElement;
   transport: HTMLElement;
+  permissionSummary: HTMLElement;
   permissionInputs: Record<"cue" | "tapSync" | "record" | "clear", HTMLInputElement>;
   stats: HTMLElement;
   qrOverlay: HTMLElement;
@@ -146,8 +147,9 @@ export function createVjUi(host: HTMLElement): VjUiElements {
       join: queryRequired<HTMLElement>(panel, "[data-remote-join]"),
       startButton: queryRequired<HTMLButtonElement>(panel, "[data-action=start-remote]"),
       showQrButton: queryRequired<HTMLButtonElement>(panel, "[data-action=show-qr]"),
-      webRtcStatus: queryRequired<HTMLElement>(panel, "[data-remote-webrtc-status]"),
+      sessionActions: queryRequired<HTMLElement>(panel, "[data-remote-session-actions]"),
       transport: queryRequired<HTMLElement>(panel, "[data-remote-transport]"),
+      permissionSummary: queryRequired<HTMLElement>(panel, "[data-remote-permission-summary]"),
       permissionInputs: {
         cue: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=cue]"),
         tapSync: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=tapSync]"),

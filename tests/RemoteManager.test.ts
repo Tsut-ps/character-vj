@@ -130,8 +130,9 @@ function createRemoteUi(): RemoteHostElements {
     join: fakeElement<HTMLElement>(),
     startButton: fakeElement<HTMLButtonElement>(),
     showQrButton: fakeElement<HTMLButtonElement>(),
-    webRtcStatus: fakeElement<HTMLElement>(),
+    sessionActions: fakeElement<HTMLElement>(),
     transport: fakeElement<HTMLElement>(),
+    permissionSummary: fakeElement<HTMLElement>(),
     permissionInputs: {
       cue: fakeElement<HTMLInputElement>(),
       tapSync: fakeElement<HTMLInputElement>(),
@@ -207,6 +208,8 @@ function createHarness(): ManagerHarness {
 /** START REMOTEを完了してready済みtransportを返す */
 async function startRemote(harness: ManagerHarness): Promise<FakeTransport> {
   harness.ui.startButton.dispatchEvent(new Event("click"));
+  assert.equal(harness.ui.status.textContent, "(STARTING)");
+  assert.equal(harness.ui.startButton.textContent, "……");
   await waitFor(() => harness.transports.length === 1);
   const transport = harness.transports[0];
   const createCall = harness.fetchCalls.find((call) => new URL(call.url).pathname === "/v1/rooms");
@@ -221,7 +224,10 @@ async function startRemote(harness: ManagerHarness): Promise<FakeTransport> {
     roomId: ROOM_ID,
     permissions: { cue: true, tapSync: false, record: false, clear: false },
   });
-  await waitFor(() => harness.ui.status.textContent === "ONLINE");
+  await waitFor(() => harness.ui.status.textContent === "● ONLINE");
+  assert.equal(harness.ui.startButton.textContent, "ON");
+  assert.equal(harness.ui.startButton.disabled, false);
+  assert.equal(harness.ui.sessionActions.hidden, false);
   return transport;
 }
 
@@ -266,6 +272,37 @@ test("Host切断時はmemory上のtokenからticketを再発行する", async ()
   harness.manager.destroy();
 });
 
+test("START REMOTEをONとOFFで切り替える", async () => {
+  const harness = createHarness();
+  const transport = await startRemote(harness);
+  harness.ui.startButton.dispatchEvent(new Event("click"));
+  assert.equal(transport.isOpen, false);
+  assert.equal(harness.ui.status.textContent, "○ OFFLINE");
+  assert.equal(harness.ui.startButton.textContent, "OFF");
+  assert.equal(harness.ui.startButton.disabled, false);
+  assert.equal(harness.ui.sessionActions.hidden, true);
+  assert.equal(harness.ui.showQrButton.disabled, true);
+  assert.equal(harness.ui.permissionInputs.cue.disabled, false);
+  harness.manager.destroy();
+});
+
+test("開始前の操作許可を折りたたみ見出しへ反映する", () => {
+  const harness = createHarness();
+  assert.equal(harness.ui.permissionSummary.textContent, "CUE");
+  harness.ui.permissionInputs.tapSync.checked = true;
+  harness.ui.permissionInputs.tapSync.dispatchEvent(new Event("change"));
+  assert.equal(harness.ui.permissionSummary.textContent, "CUE · TAP");
+  harness.manager.destroy();
+});
+
+test("Remote errorを見出しへ記号付きで表示する", async () => {
+  const harness = createHarness();
+  const transport = await startRemote(harness);
+  transport.receive({ v: 1, type: "error", code: "test_error", message: "test error" });
+  assert.equal(harness.ui.status.textContent, "× ERROR");
+  harness.manager.destroy();
+});
+
 test("WebRTC command replayを二重発火せずdisconnect時にCueを解放する", async () => {
   const harness = createHarness();
   const transport = await startRemote(harness);
@@ -297,6 +334,6 @@ test("Remote開始時にTURN credential APIを呼ばない", async () => {
   const harness = createHarness();
   await startRemote(harness);
   assert.equal(harness.fetchCalls.some((call) => call.url.endsWith("/ice-servers")), false);
-  assert.equal(harness.ui.transport.textContent, "WebRTC (未接続)");
+  assert.equal(harness.ui.transport.textContent, "未接続");
   harness.manager.destroy();
 });

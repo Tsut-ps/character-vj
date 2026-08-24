@@ -121,10 +121,11 @@ export class RemoteManager {
       dependencies.webRtcFactory?.(webRtcEvents) ??
       new WebRtcHost(webRtcEvents);
     this.adapter.setPermissions(this.permissions);
+    this.syncPermissionInputs();
 
     this.ui.startButton.addEventListener(
       "click",
-      () => void this.startRemote(),
+      () => this.toggleRemote(),
       { signal },
     );
     this.ui.showQrButton.addEventListener("click", () => void this.showQr(), {
@@ -141,9 +142,11 @@ export class RemoteManager {
       );
     }
     this.renderConnectionSummary();
+    this.renderControllerState();
+    this.renderRemoteToggle(false);
+    this.renderStatus("OFFLINE");
     if (!this.baseUrl) {
-      this.ui.status.textContent = "NOT CONFIGURED";
-      this.ui.startButton.disabled = true;
+      this.renderStatus("NOT CONFIGURED");
       this.ui.showQrButton.disabled = true;
       this.ui.startButton.title = "Set VITE_REMOTE_BASE_URL at build time";
     } else {
@@ -171,16 +174,38 @@ export class RemoteManager {
     this.rejectReadyWaiters("Remote manager destroyed");
   }
 
+  /** Remote sessionのONとOFFを現在状態から切り替える */
+  private toggleRemote(): void {
+    if (this.session || this.transport || this.reconnecting) {
+      this.stopRemote();
+      return;
+    }
+    void this.startRemote();
+  }
+
+  /** JOINを閉じてRemote sessionを手動終了する */
+  private stopRemote(): void {
+    if (this.ready && this.joinOpen) {
+      this.transport?.send({
+        v: 1,
+        type: "closeJoin",
+        requestId: crypto.randomUUID(),
+      });
+    }
+    this.endSession("OFFLINE");
+    this.log("REMOTE OFFLINE");
+  }
+
   private async startRemote(): Promise<void> {
     if (this.destroyed || !this.baseUrl || this.session || this.transport)
       return;
-    this.ui.startButton.disabled = true;
+    this.renderRemoteToggle(false, true);
     this.setPermissionInputsDisabled(true);
-    this.ui.status.textContent = "STARTING";
+    this.renderStatus("STARTING");
     try {
       await this.ensureSession();
       await this.waitUntilReady();
-      this.ui.status.textContent = "ONLINE";
+      this.renderStatus("ONLINE");
       this.ui.showQrButton.disabled = false;
       this.log("REMOTE ONLINE");
     } catch (error) {
@@ -189,7 +214,7 @@ export class RemoteManager {
       this.endSession("ERROR");
       this.log(`REMOTE ERROR / ${message}`);
     } finally {
-      this.ui.startButton.disabled = Boolean(this.session) || !this.baseUrl;
+      this.renderRemoteToggle(Boolean(this.session));
     }
   }
 
@@ -219,7 +244,8 @@ export class RemoteManager {
       this.ui.qrStatus.textContent = "JOIN OPEN";
       this.ui.qrOverlay.hidden = false;
       this.joinVisible = true;
-      this.ui.showQrButton.textContent = "QR SHOWN";
+      this.ui.showQrButton.textContent = "QR表示中";
+      this.renderStatus("ONLINE");
       this.log("REMOTE JOIN OPEN");
     } catch (error) {
       if (this.joinOpen && this.ready) {
@@ -236,6 +262,7 @@ export class RemoteManager {
       this.joinOpen = false;
       this.ui.join.textContent = "CLOSED";
       this.hideQrView();
+      this.renderStatus("ERROR");
       this.log(
         `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote connection failed"}`,
       );
@@ -258,9 +285,10 @@ export class RemoteManager {
       this.joinOpen = false;
       this.ui.join.textContent = "CLOSED";
       this.hideQrView();
-      this.ui.status.textContent = "ONLINE";
+      this.renderStatus("ONLINE");
       this.log("REMOTE JOIN CLOSED");
     } catch (error) {
+      this.renderStatus("ERROR");
       this.ui.qrStatus.textContent =
         error instanceof Error ? error.message : "CLOSE FAILED";
     } finally {
@@ -301,7 +329,7 @@ export class RemoteManager {
       events: {
         onOpen: () => {
           if (this.transport === transport)
-            this.ui.status.textContent = "AUTHENTICATING";
+            this.renderStatus("AUTHENTICATING");
         },
         onClose: (event) => {
           if (this.transport === transport) this.handleClose(event);
@@ -311,7 +339,7 @@ export class RemoteManager {
         },
         onError: () => {
           if (!this.destroyed && this.transport === transport)
-            this.ui.status.textContent = "RECONNECTING";
+            this.renderStatus("RECONNECTING");
         },
       },
     });
@@ -339,7 +367,7 @@ export class RemoteManager {
     this.clearControllerConnections();
     this.rejectPending("Remote connection closed");
     this.hideQrView();
-    this.ui.status.textContent = "RECONNECTING";
+    this.renderStatus("RECONNECTING");
     this.ui.showQrButton.disabled = true;
     void this.reconnectHost();
   }
@@ -407,8 +435,8 @@ export class RemoteManager {
     this.transport = null;
     this.session = null;
     transport?.close();
-    this.ui.status.textContent = status;
-    this.ui.startButton.disabled = !this.baseUrl;
+    this.renderStatus(status);
+    this.renderRemoteToggle(false);
     this.ui.showQrButton.disabled = true;
     this.setPermissionInputsDisabled(false);
   }
@@ -423,8 +451,8 @@ export class RemoteManager {
         this.permissions = message.permissions;
         this.adapter.setPermissions(message.permissions);
         this.syncPermissionInputs();
-        this.ui.status.textContent = "ONLINE";
-        this.ui.startButton.disabled = true;
+        this.renderStatus("ONLINE");
+        this.renderRemoteToggle(true);
         this.ui.showQrButton.disabled = false;
         this.ui.closeQrButton.disabled = false;
         for (const waiter of this.readyWaiters) {
@@ -501,6 +529,7 @@ export class RemoteManager {
         void this.webRtc.handleCandidate(message);
         return;
       case "error":
+        this.renderStatus("ERROR");
         this.log(`REMOTE ${message.code} / ${message.message}`);
         return;
       default:
@@ -518,6 +547,7 @@ export class RemoteManager {
       clear: this.ui.permissionInputs.clear.checked,
     };
     this.adapter.setPermissions(this.permissions);
+    this.renderPermissionSummary();
   }
 
   private request(
@@ -576,9 +606,11 @@ export class RemoteManager {
   private renderControllerState(): void {
     this.ui.count.textContent = String(this.controllers.size);
     if (this.controllers.size === 0) {
-      this.ui.stats.innerHTML = "<span>NO CONTROLLERS</span>";
+      this.ui.stats.hidden = true;
+      this.ui.stats.replaceChildren();
       return;
     }
+    this.ui.stats.hidden = false;
     this.ui.stats.replaceChildren(
       ...[...this.controllers].map((id, index) => {
         const row = document.createElement("div");
@@ -592,9 +624,8 @@ export class RemoteManager {
 
   private renderConnectionSummary(): void {
     const anyRtc = [...this.webRtcByController.values()].some(Boolean);
-    this.ui.webRtcStatus.textContent = `WebRTC ${anyRtc ? "CONNECTED" : "DISCONNECTED"}`;
     const state = anyRtc ? "DIRECT" : this.controllers.size > 0 ? "接続中" : "未接続";
-    this.ui.transport.textContent = `WebRTC (${state})`;
+    this.ui.transport.textContent = state;
   }
 
   /** controller peerと表示用connection stateをまとめて破棄する */
@@ -612,6 +643,18 @@ export class RemoteManager {
     this.ui.permissionInputs.tapSync.checked = this.permissions.tapSync;
     this.ui.permissionInputs.record.checked = this.permissions.record;
     this.ui.permissionInputs.clear.checked = this.permissions.clear;
+    this.renderPermissionSummary();
+  }
+
+  /** 選択中permissionを折りたたみ見出しへ短く表示する */
+  private renderPermissionSummary(): void {
+    const labels = [
+      this.permissions.cue ? "CUE" : null,
+      this.permissions.tapSync ? "TAP" : null,
+      this.permissions.record ? "REC" : null,
+      this.permissions.clear ? "CLEAR" : null,
+    ].filter((label): label is string => label !== null);
+    this.ui.permissionSummary.textContent = labels.length > 0 ? labels.join(" · ") : "許可なし";
   }
 
   /** permission入力のsession中変更を防ぐ */
@@ -619,11 +662,35 @@ export class RemoteManager {
     for (const input of Object.values(this.ui.permissionInputs)) input.disabled = disabled;
   }
 
+  /** Remote toggleのlabelと操作可否を同じ状態から描画する */
+  private renderRemoteToggle(active: boolean, busy = false): void {
+    this.ui.startButton.textContent = busy ? "……" : active ? "ON" : "OFF";
+    this.ui.startButton.disabled = busy || !this.baseUrl || this.destroyed;
+    this.ui.startButton.classList.toggle("active", active);
+    this.ui.startButton.setAttribute("aria-pressed", String(active));
+    this.ui.startButton.setAttribute("aria-label", active ? "Remoteを停止" : "Remoteを開始");
+    this.ui.sessionActions.hidden = !active;
+  }
+
+  /** Remote状態を記号と色へ統一して見出しへ表示する */
+  private renderStatus(status: string): void {
+    const state = status === "ONLINE"
+      ? "online"
+      : status === "OFFLINE"
+        ? "offline"
+        : status === "STARTING" || status === "AUTHENTICATING" || status === "RECONNECTING"
+          ? "pending"
+          : "error";
+    const mark = state === "online" ? "●" : state === "offline" ? "○" : state === "pending" ? "……" : "×";
+    this.ui.status.textContent = status === "STARTING" ? "(STARTING)" : `${mark} ${status}`;
+    this.ui.status.setAttribute("data-state", state);
+  }
+
   private hideQrView(): void {
     this.joinVisible = false;
     this.ui.qrOverlay.hidden = true;
     this.ui.qrImage.removeAttribute("src");
-    this.ui.showQrButton.textContent = "SHOW QR";
+    this.ui.showQrButton.textContent = "QRを表示";
     this.ui.showQrButton.disabled = !this.ready;
   }
 
