@@ -55,16 +55,6 @@ export class WebSocketTransport implements RemoteTransport {
 
   /** signaling payloadをOPEN時だけ送り再接続後は呼び出し側で再同期する */
   send(message: unknown): boolean {
-    return this.sendOnlyWhenOpen(message);
-  }
-
-  /** signaling接続を明示的に閉じる */
-  close(): void {
-    try { this.socket.close(1000, "client shutdown"); } catch { /* noop */ }
-  }
-
-  /** CLOSED中はstale messageを保持せず送信を拒否する */
-  private sendOnlyWhenOpen(message: unknown): boolean {
     if (!this.isOpen) return false;
     const encoded = JSON.stringify(message);
     try {
@@ -73,5 +63,10 @@ export class WebSocketTransport implements RemoteTransport {
     } catch {
       return false;
     }
+  }
+
+  /** signaling接続を明示的に閉じる */
+  close(): void {
+    try { this.socket.close(1000, "client shutdown"); } catch { /* noop */ }
   }
 }

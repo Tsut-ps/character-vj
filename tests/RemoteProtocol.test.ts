@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   isTerminalControllerClose,
   parseRemoteEnvelopeMessage,
+  parseRtcDataMessage,
   parseServerMessage,
   REMOTE_INITIAL_CONNECT_MAX_MS,
   REMOTE_SESSION_MAX_MS,
@@ -24,6 +25,12 @@ test("DataChannelでは検証済みRemoteEnvelopeだけを受け付ける", () =
   assert.equal(parseRemoteEnvelopeMessage(valid)?.seq, 3);
   assert.equal(parseRemoteEnvelopeMessage(JSON.stringify({ v: 1, seq: 3, command: { type: "cue", cue: 10, state: "down" } })), null);
   assert.equal(parseRemoteEnvelopeMessage("x".repeat(1025)), null);
+});
+
+test("RTTはHost側だけで計測してControllerへ返送しない", () => {
+  const nonce = crypto.randomUUID();
+  assert.equal(parseRtcDataMessage(JSON.stringify({ v: 1, type: "ping", nonce }))?.type, "ping");
+  assert.equal(parseRtcDataMessage(JSON.stringify({ v: 1, type: "latency", rttMs: 10 })), null);
 });
 
 test("server signalingはcontroller identity付きschemaだけを受け付ける", () => {

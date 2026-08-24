@@ -23,7 +23,6 @@ export class ControllerApp {
     this.connection = new ControllerConnection({
       onStatus: (status, detail) => this.setStatus(status, detail),
       onPermissions: (permissions) => this.setPermissions(permissions),
-      onLatency: (rttMs) => this.setLatency(rttMs),
       onWebRtcState: (connected) => this.setWebRtcState(connected),
     });
     this.bindControls();
@@ -58,7 +57,7 @@ export class ControllerApp {
     }).join("");
     return `
       <section class="controller-shell">
-        <header><h1>Character VJ Remote</h1><div class="connection-line"><b data-status>● JOINING</b><span data-latency>— ms</span></div></header>
+        <header><h1>Character VJ Remote</h1><b data-status>● JOINING</b></header>
         <div class="cue-grid">${cueButtons}</div>
         <div class="utility-grid">
           <button data-command="tap">TAP</button>
@@ -66,8 +65,7 @@ export class ControllerApp {
           <button data-command="record">REC</button>
         </div>
         <button class="clear" data-command="clear">CLEAR</button>
-        <div class="controller-connection"><span>MODE</span><b>DIRECT</b><b data-webrtc-status>WebRTC DISCONNECTED</b></div>
-        <div class="controller-path"><span>Transport</span><b data-transport>WebRTC (未接続)</b></div>
+        <div class="controller-path"><span>WebRTC Direct</span><b data-transport>未接続</b></div>
         <p data-detail></p>
       </section>
     `;
@@ -142,14 +140,9 @@ export class ControllerApp {
     this.applyDisabledState();
   }
 
-  private setLatency(rttMs: number): void {
-    this.required<HTMLElement>("[data-latency]").textContent = `${Math.round(rttMs)} ms`;
-  }
-
   private setWebRtcState(connected: boolean): void {
     this.webRtcConnected = connected;
-    this.required<HTMLElement>("[data-webrtc-status]").textContent = `WebRTC ${connected ? "CONNECTED" : "DISCONNECTED"}`;
-    this.required<HTMLElement>("[data-transport]").textContent = `WebRTC (${connected ? "DIRECT" : "未接続"})`;
+    this.required<HTMLElement>("[data-transport]").textContent = connected ? "接続済み" : "未接続";
     if (!connected) this.releaseLocalPointers();
     this.applyDisabledState();
   }

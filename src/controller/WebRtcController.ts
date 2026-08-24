@@ -17,7 +17,6 @@ const MAX_RTC_MESSAGES_PER_SECOND = 120;
 export interface WebRtcControllerEvents {
   sendSignal(message: ControllerRtcSignal): boolean;
   onState(connected: boolean): void;
-  onLatency(rttMs: number): void;
 }
 
 /** Controller側の単一Host peerとDataChannelを管理する */
@@ -124,7 +123,6 @@ export class WebRtcController {
     const message = parseRtcDataMessage(data);
     if (!message) return;
     if (message.type === "ping") this.sendData({ v: 1, type: "pong", nonce: message.nonce });
-    else if (message.type === "latency") this.events.onLatency(message.rttMs);
   }
 
   /** schema検証前に過剰なDataChannel frameを落とす */

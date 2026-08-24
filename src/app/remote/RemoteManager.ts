@@ -115,7 +115,7 @@ export class RemoteManager {
       onState: (controllerSessionId, connected) =>
         this.handleWebRtcState(controllerSessionId, connected),
       onLatency: (controllerSessionId, rttMs) =>
-        this.handleWebRtcLatency(controllerSessionId, rttMs),
+        this.setLatency(controllerSessionId, rttMs),
     };
     this.webRtc =
       dependencies.webRtcFactory?.(webRtcEvents) ??
@@ -579,13 +579,6 @@ export class RemoteManager {
       }, 8_000);
       this.readyWaiters.add(waiter);
     });
-  }
-
-  private handleWebRtcLatency(
-    controllerSessionId: string,
-    rttMs: number,
-  ): void {
-    this.setLatency(controllerSessionId, rttMs);
   }
 
   private setLatency(controllerSessionId: string, rttMs: number): void {

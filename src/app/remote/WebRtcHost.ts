@@ -220,7 +220,6 @@ export class WebRtcHost implements RemoteWebRtcHost {
     peer.pendingPings.delete(message.nonce);
     const rttMs = Math.max(0, performance.now() - sentAt);
     this.events.onLatency(controllerSessionId, rttMs);
-    this.sendData(peer, { v: 1, type: "latency", rttMs });
   }
 
   /** schema検証前に過剰なDataChannel frameを落とす */

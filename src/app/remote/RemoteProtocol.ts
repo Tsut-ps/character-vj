@@ -183,7 +183,6 @@ const rtcDataMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("remote"), envelope: remoteEnvelopeSchema }).strict(),
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.string().uuid() }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("latency"), rttMs: z.number().finite().nonnegative().max(60_000) }).strict(),
 ]);
 export type RtcDataMessage = z.infer<typeof rtcDataMessageSchema>;
 

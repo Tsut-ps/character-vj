@@ -14,7 +14,6 @@ import { WebRtcController } from "./WebRtcController.ts";
 export interface ControllerConnectionEvents {
   onStatus(status: "joining" | "connecting" | "connected" | "disconnected" | "error", detail?: string): void;
   onPermissions(permissions: RemotePermissions): void;
-  onLatency(rttMs: number): void;
   onWebRtcState(connected: boolean): void;
 }
 
@@ -35,7 +34,6 @@ export class ControllerConnection {
     this.webRtc = new WebRtcController({
       sendSignal: (message) => this.transport?.send(message) ?? false,
       onState: (connected) => this.events.onWebRtcState(connected),
-      onLatency: (rttMs) => this.events.onLatency(rttMs),
     });
     this.commands = new ControllerCommandSender((envelope) => this.webRtc.send(envelope));
   }

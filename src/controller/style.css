@@ -79,21 +79,10 @@ h1 {
   text-transform: uppercase;
 }
 
-.connection-line {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: center;
-  font-size: 10px;
-  letter-spacing: .06em;
-}
-
-.connection-line > span {
-  color: rgba(255, 255, 255, .55);
-}
-
 [data-status] {
   color: rgba(255, 255, 255, .72);
+  font-size: 10px;
+  letter-spacing: .06em;
 }
 
 [data-status][data-state="connected"] {
@@ -139,34 +128,6 @@ h1 {
   width: 100%;
 }
 
-.controller-connection {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 8px;
-  align-items: center;
-  padding: 9px;
-  border: 1px solid rgba(130, 220, 255, .28);
-  background: rgba(3, 20, 28, .7);
-  font-size: 9px;
-}
-
-.controller-connection > span {
-  color: rgba(255, 255, 255, .55);
-}
-
-.controller-connection > b {
-  color: #7fe6ff;
-  font-size: 9px;
-  text-align: right;
-}
-
-.controller-connection > b:last-child {
-  grid-column: 1 / -1;
-  padding-top: 5px;
-  border-top: 1px solid rgba(255, 255, 255, .08);
-  text-align: left;
-}
-
 .controller-path {
   margin-top: auto;
   display: grid;
@@ -182,6 +143,11 @@ h1 {
   color: rgba(255, 255, 255, .55);
 }
 
+.controller-path b {
+  color: #7fe6ff;
+  text-align: right;
+}
+
 [data-detail] {
   min-height: 1.4em;
   margin: 0;
@@ -194,7 +160,7 @@ h1 {
   .controller-shell {
     display: grid;
     grid-template-columns: minmax(190px, 1fr) minmax(0, 1.4fr);
-    grid-template-rows: auto auto auto 1fr auto;
+    grid-template-rows: auto auto auto 1fr;
     min-height: 100svh;
   }
 
@@ -213,15 +179,10 @@ h1 {
     grid-row: 3;
   }
 
-  .controller-connection {
+  .controller-path {
     grid-column: 1;
     grid-row: 4;
     align-self: start;
-  }
-
-  .controller-path {
-    grid-column: 1;
-    grid-row: 5;
     margin-top: 0;
   }
 
@@ -231,7 +192,7 @@ h1 {
 
   .cue-grid {
     grid-column: 2;
-    grid-row: 1 / 6;
+    grid-row: 1 / 5;
     align-content: stretch;
   }
 
