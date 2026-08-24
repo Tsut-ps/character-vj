@@ -92,7 +92,7 @@ npm run dev
 
 ## 観客スマホリモート
 
-VJホストの `REMOTE` → `START REMOTE` で1時間のリモートセッションを開始し、`SHOW QR` から観客のスマートフォンをコントローラーとして接続する
+VJホストの `REMOTE` をONにして1時間のリモートセッションを開始し、`QRを表示` から観客のスマートフォンをコントローラーとして接続する
 
 操作データはCloudflare STUNで接続経路を見つけ、ホストと各コントローラー間のWebRTC DataChannelで直接送信します
 
@@ -100,7 +100,7 @@ WorkerとDurable Objectは参加認証、権限配布、接続状態、WebRTCシ
 
 TURNとWebSocket中継へのフォールバックはありません。ネットワーク構成やファイアウォールによって直接接続できない端末では操作できません
 
-初期権限ではキュー1〜9だけを許可します。`START REMOTE` の前に `AUDIENCE ALLOW` から `TAP / SYNC`、`RECORD`、`CLEAR` を追加でき、開始後はセッション終了まで固定されます
+初期権限ではキュー1〜9だけを許可します。RemoteをONにする前に `操作許可` から `TAP / SYNC`、`RECORD`、`CLEAR` を追加でき、開始後はセッション終了まで固定されます
 
 ## ライセンス
 
