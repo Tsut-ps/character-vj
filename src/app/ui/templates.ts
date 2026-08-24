@@ -58,7 +58,7 @@ export const CONTROL_PANEL_HTML = `
     <div class="remote-count">Join: <b data-remote-join>CLOSED</b></div>
     <button data-action="start-remote" class="remote-start">START REMOTE</button>
     <button data-action="show-qr" class="remote-show" disabled>SHOW QR</button>
-    <div class="remote-connection"><span>CONNECTION</span><div><button class="selected" data-remote-connection="auto" aria-pressed="true">AUTO</button><button data-remote-connection="direct" aria-pressed="false">DIRECT</button><button data-remote-connection="turn" aria-pressed="false">TURN</button><button data-remote-connection="ws" aria-pressed="false">WS RELAY</button></div></div>
+    <div class="remote-connection"><span>CONNECTION</span><b>DIRECT</b></div>
     <div class="remote-webrtc-status" data-remote-webrtc-status>WebRTC DISCONNECTED</div>
     <fieldset>
       <legend>AUDIENCE ALLOW</legend>
@@ -67,7 +67,7 @@ export const CONTROL_PANEL_HTML = `
       <label><input data-remote-permission="record" type="checkbox"> RECORD</label>
       <label><input data-remote-permission="clear" type="checkbox"> CLEAR</label>
     </fieldset>
-    <div class="remote-transport"><span>Transport</span><b data-remote-transport>WebSocket</b><span>Path</span><b data-remote-path>WS RELAY</b></div>
+    <div class="remote-transport"><span>Transport</span><b data-remote-transport>WebRTC</b><span>Path</span><b data-remote-path>UNKNOWN</b></div>
     <div class="remote-stats" data-remote-stats><span>NO CONTROLLERS</span></div>
   </section>
   <div class="panel-actions">

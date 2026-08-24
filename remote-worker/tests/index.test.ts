@@ -171,7 +171,7 @@ describe("Worker edge security", () => {
     second.close(1000, "done");
   });
 
-  it("操作中seqをattachmentへ保持して切断時だけSQLiteへ保存する", async () => {
+  it("Controller command本文を拒否し切断状態だけ永続化する", async () => {
     const roomId = crypto.randomUUID();
     const hostToken = createSecretToken();
     const hostTicket = createSecretToken();
@@ -193,14 +193,6 @@ describe("Worker edge security", () => {
       controllerSessionId,
       expiresAt,
     )).ok).toBe(true);
-    await runInDurableObject(stub, (_instance, state) => {
-      const pending = state.storage.sql.exec<{ expires_at: number }>(
-        "SELECT expires_at FROM tickets WHERE controller_session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(pending.expires_at).toBeLessThan(expiresAt);
-    });
-
     const hostResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
     const host = hostResponse.webSocket!;
     const hostReady = waitForMessage(host, (message) => message.type === "ready");
@@ -212,63 +204,19 @@ describe("Worker edge security", () => {
     const controllerReady = waitForMessage(controller, (message) => message.type === "ready");
     controller.accept();
     await controllerReady;
-    await runInDurableObject(stub, (_instance, state) => {
-      const active = state.storage.sql.exec<{ expires_at: number }>(
-        "SELECT expires_at FROM tickets WHERE controller_session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(active.expires_at).toBe(expiresAt);
-    });
-
-    const firstRemote = waitForMessage(host, (message) => message.type === "remote");
+    const rejected = waitForMessage(controller, (message) => message.type === "error");
     controller.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "down" } }));
-    await firstRemote;
-    await runInDurableObject(stub, (_instance, state) => {
-      const row = state.storage.sql.exec<{ last_seq: number }>(
-        "SELECT last_seq FROM controllers WHERE session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(row.last_seq).toBe(-1);
-    });
-
-    const controllerReplaced = waitForClose(controller);
-    const replacementResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
-    const replacement = replacementResponse.webSocket!;
-    const replacementReady = waitForMessage(replacement, (message) => message.type === "ready");
-    replacement.accept();
-    await replacementReady;
-    expect((await controllerReplaced).code).toBe(4002);
-
+    expect(await rejected).toMatchObject({ code: "forbidden_message" });
     const disconnected = waitForMessage(host, (message) => message.type === "controllerDisconnected");
-    replacement.close(1000, "checkpoint");
+    controller.close(1000, "done");
     await disconnected;
     await runInDurableObject(stub, (_instance, state) => {
-      const row = state.storage.sql.exec<{ last_seq: number; current_connection_id: string | null }>(
-        "SELECT last_seq, current_connection_id FROM controllers WHERE session_id = ?",
+      const row = state.storage.sql.exec<{ current_connection_id: string | null }>(
+        "SELECT current_connection_id FROM controllers WHERE session_id = ?",
         controllerSessionId,
       ).one();
-      expect(row).toEqual({ last_seq: 1, current_connection_id: null });
+      expect(row.current_connection_id).toBeNull();
     });
-
-    const reconnectResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
-    const reconnect = reconnectResponse.webSocket!;
-    const reconnectReady = waitForMessage(reconnect, (message) => message.type === "ready");
-    reconnect.accept();
-    await reconnectReady;
-    const forwardedSeq: number[] = [];
-    host.addEventListener("message", (event) => {
-      const message = JSON.parse(String(event.data)) as { type?: string; envelope?: { seq?: number } };
-      if (message.type === "remote" && typeof message.envelope?.seq === "number") forwardedSeq.push(message.envelope.seq);
-    });
-    const nextRemote = waitForMessage(host, (message) => {
-      const envelope = message.envelope as Record<string, unknown> | undefined;
-      return message.type === "remote" && envelope?.seq === 2;
-    });
-    reconnect.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "up" } }));
-    reconnect.send(JSON.stringify({ v: 1, seq: 2, command: { type: "cue", cue: 1, state: "up" } }));
-    await nextRemote;
-    expect(forwardedSeq).toEqual([2]);
-    reconnect.close(1000, "done");
     host.close(1000, "done");
   });
 

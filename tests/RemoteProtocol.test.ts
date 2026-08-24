@@ -9,6 +9,7 @@ import {
   remoteInitialConnectTimeoutMs,
   remoteSessionTimeoutMs,
 } from "../src/app/remote/RemoteProtocol.ts";
+import { createRemoteRtcConfiguration } from "../src/app/remote/WebRtcConfig.ts";
 
 test("二重接続と期限切れのclose codeでは再接続を止める", () => {
   assert.equal(isTerminalControllerClose(4002), true);
@@ -30,6 +31,12 @@ test("server signalingはcontroller identity付きschemaだけを受け付ける
   const rtcSessionId = crypto.randomUUID();
   assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }))?.type, "rtcOffer");
   assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcAnswer", rtcSessionId, sdp: "v=0" })), null);
+});
+
+test("WebRTCはCloudflare STUNだけを使う直接接続に固定する", () => {
+  const configuration = createRemoteRtcConfiguration();
+  assert.equal(configuration.iceTransportPolicy, "all");
+  assert.deepEqual(configuration.iceServers, [{ urls: "stun:stun.cloudflare.com:3478" }]);
 });
 
 test("client時計が遅れていても再接続を1時間で止める", () => {

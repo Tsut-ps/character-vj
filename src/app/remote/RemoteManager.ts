@@ -1,16 +1,13 @@
 import QRCode from "qrcode";
-import type { RemoteHostElements } from "../ui/createVjUi";
+import type { RemoteHostElements } from "../ui/createVjUi.ts";
 import { RemoteInputAdapter } from "./RemoteInputAdapter.ts";
 import {
   createRoomResponseSchema,
   DEFAULT_REMOTE_PERMISSIONS,
   hostTicketResponseSchema,
-  iceServersResponseSchema,
   parseServerMessage,
   remoteSessionTimeoutMs,
   type HostClientMessage,
-  type RemoteConnectionMode,
-  type RemoteIceServers,
   type RemotePath,
   type RemotePermissions,
   type ServerMessage,
@@ -66,14 +63,11 @@ export class RemoteManager {
   private readonly controllerUrl: () => URL;
   private readonly webRtc: RemoteWebRtcHost;
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
-  private connectionMode: RemoteConnectionMode = "auto";
   private session: {
     roomId: string;
     hostToken: string;
     expiresAt: number;
   } | null = null;
-  private sessionTicket: string | null = null;
-  private cachedIceServers: RemoteIceServers | null = null;
   private transport: RemoteTransport | null = null;
   private ready = false;
   private joinOpen = false;
@@ -85,16 +79,10 @@ export class RemoteManager {
     string,
     ControllerWebRtcState
   >();
-  private readonly pendingPings = new Map<
-    string,
-    { controllerSessionId: string; sentAt: number }
-  >();
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
-  private rtcConfigGeneration = 0;
 
   constructor(
     ui: RemoteHostElements,
@@ -131,11 +119,8 @@ export class RemoteManager {
           window.location.origin,
         ));
     const webRtcEvents: WebRtcHostEvents = {
-      sendSignal: (message) => this.transport?.sendReliable(message) ?? false,
-      onEnvelope: (controllerSessionId, envelope) => {
-        if (this.connectionMode !== "ws")
-          this.adapter.handle(controllerSessionId, envelope);
-      },
+      sendSignal: (message) => this.transport?.send(message) ?? false,
+      onEnvelope: (controllerSessionId, envelope) => this.adapter.handle(controllerSessionId, envelope),
       onState: (controllerSessionId, connected, path) =>
         this.handleWebRtcState(controllerSessionId, connected, path),
       onLatency: (controllerSessionId, rttMs) =>
@@ -157,13 +142,6 @@ export class RemoteManager {
     this.ui.closeQrButton.addEventListener("click", () => void this.closeQr(), {
       signal,
     });
-    for (const [button, mode] of this.connectionModeButtons()) {
-      button.addEventListener(
-        "click",
-        () => void this.requestConnectionMode(mode),
-        { signal },
-      );
-    }
     for (const input of Object.values(this.ui.permissionInputs)) {
       input.addEventListener(
         "change",
@@ -171,7 +149,7 @@ export class RemoteManager {
         { signal },
       );
     }
-    this.updateModeUi();
+    this.renderConnectionSummary();
     if (!this.baseUrl) {
       this.ui.status.textContent = "NOT CONFIGURED";
       this.ui.startButton.disabled = true;
@@ -186,14 +164,12 @@ export class RemoteManager {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.ready && this.joinOpen)
-      this.transport?.sendReliable({
+      this.transport?.send({
         v: 1,
         type: "closeJoin",
         requestId: crypto.randomUUID(),
       });
-    if (this.pingTimer !== null) clearInterval(this.pingTimer);
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
-    this.pingTimer = null;
     this.expiryTimer = null;
     this.adapter.resetSession();
     this.webRtc.destroy();
@@ -262,7 +238,7 @@ export class RemoteManager {
             requestId: crypto.randomUUID(),
           });
         } catch {
-          /* server closes join on host loss */
+          /* Host切断時はserver側でもJOINを閉じる */
         }
       }
       this.joinOpen = false;
@@ -325,7 +301,6 @@ export class RemoteManager {
 
   private connect(sessionTicket: string): void {
     if (!this.session) throw new Error("Missing room id");
-    this.sessionTicket = sessionTicket;
     let transport: RemoteTransport;
     transport = this.transportFactory({
       baseUrl: this.baseUrl,
@@ -428,9 +403,7 @@ export class RemoteManager {
 
   private endSession(status: string): void {
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
-    if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.expiryTimer = null;
-    this.pingTimer = null;
     this.ready = false;
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
@@ -442,8 +415,6 @@ export class RemoteManager {
     const transport = this.transport;
     this.transport = null;
     this.session = null;
-    this.sessionTicket = null;
-    this.cachedIceServers = null;
     transport?.close();
     this.ui.status.textContent = status;
     this.ui.startButton.disabled = !this.baseUrl;
@@ -469,8 +440,7 @@ export class RemoteManager {
           waiter.resolve();
         }
         this.readyWaiters.clear();
-        this.startPings();
-        this.transport?.sendReliable({
+        this.transport?.send({
           v: 1,
           type: "requestState",
           requestId: crypto.randomUUID(),
@@ -502,13 +472,6 @@ export class RemoteManager {
             this.adapter.releaseController(controllerSessionId);
             this.rttByController.delete(controllerSessionId);
             this.webRtcByController.delete(controllerSessionId);
-            this.webRtc.controllerDisconnected(controllerSessionId);
-
-            for (const [nonce, ping] of this.pendingPings) {
-              if (ping.controllerSessionId === controllerSessionId) {
-                this.pendingPings.delete(nonce);
-              }
-            }
           }
         }
 
@@ -517,16 +480,13 @@ export class RemoteManager {
           this.controllers.add(controllerSessionId);
         }
 
-        void this.applyConnectionMode(message.connectionMode);
+        this.webRtc.syncControllers(this.controllers);
         this.renderConnectionSummary();
 
         if (!message.joinOpen) this.hideQrView();
         this.renderControllerState();
         return;
       }
-      case "connectionMode":
-        void this.applyConnectionMode(message.mode);
-        return;
       case "controllerConnected":
         this.controllers.add(message.controllerSessionId);
         this.webRtc.controllerConnected(message.controllerSessionId);
@@ -541,26 +501,11 @@ export class RemoteManager {
         this.renderConnectionSummary();
         this.renderControllerState();
         return;
-      case "remote": {
-        const rtcConnected =
-          this.webRtcByController.get(message.controllerSessionId)
-            ?.connected === true;
-        if (
-          this.connectionMode === "ws" ||
-          (this.connectionMode === "auto" && !rtcConnected)
-        ) {
-          this.adapter.handle(message.controllerSessionId, message.envelope);
-        }
-        return;
-      }
       case "rtcAnswer":
         void this.webRtc.handleAnswer(message);
         return;
       case "rtcIceCandidate":
         void this.webRtc.handleCandidate(message);
-        return;
-      case "pong":
-        this.handleWsPong(message.controllerSessionId, message.nonce);
         return;
       case "error":
         this.log(`REMOTE ${message.code} / ${message.message}`);
@@ -568,88 +513,6 @@ export class RemoteManager {
       default:
         return;
     }
-  }
-
-  private async requestConnectionMode(
-    mode: RemoteConnectionMode,
-  ): Promise<void> {
-    if (this.connectionMode === mode && this.ready) return;
-    this.adapter.releaseAllControllers();
-    if (!this.ready) {
-      await this.applyConnectionMode(mode);
-      return;
-    }
-    try {
-      const ack = await this.request({
-        v: 1,
-        type: "setConnectionMode",
-        requestId: crypto.randomUUID(),
-        mode,
-      });
-      if (!ack.ok)
-        throw new Error(ack.error ?? "Connection mode update failed");
-      await this.applyConnectionMode(mode);
-      this.log(`REMOTE MODE / ${this.modeLabel(mode)}`);
-    } catch (error) {
-      this.log(
-        `REMOTE ERROR / ${error instanceof Error ? error.message : "Connection mode update failed"}`,
-      );
-    }
-  }
-
-  /** server-authoritative modeをHost WebRTCとUIへ適用する */
-  private async applyConnectionMode(mode: RemoteConnectionMode): Promise<void> {
-    const generation = ++this.rtcConfigGeneration;
-    if (this.connectionMode !== mode) this.adapter.releaseAllControllers();
-    this.connectionMode = mode;
-    this.updateModeUi();
-    if (mode === "ws") {
-      this.webRtc.setMode("ws", []);
-      this.webRtcByController.clear();
-      this.renderConnectionSummary();
-      this.renderControllerState();
-      return;
-    }
-    try {
-      const iceServers = mode === "direct" ? [] : await this.getIceServers();
-      if (
-        generation !== this.rtcConfigGeneration ||
-        this.connectionMode !== mode
-      )
-        return;
-      this.webRtc.setMode(mode, this.controllers, iceServers);
-    } catch (error) {
-      if (generation !== this.rtcConfigGeneration) return;
-      this.webRtc.setMode("ws", []);
-      this.webRtcByController.clear();
-      this.log(
-        `REMOTE TURN ERROR / ${error instanceof Error ? error.message : "credential failed"}`,
-      );
-    }
-    this.renderConnectionSummary();
-    this.renderControllerState();
-  }
-
-  private async getIceServers(): Promise<RemoteIceServers> {
-    if (this.cachedIceServers) return this.cachedIceServers;
-    if (!this.session || !this.sessionTicket)
-      throw new Error("Remote session is not ready");
-    const response = await this.fetchImpl(
-      new URL(
-        `v1/rooms/${encodeURIComponent(this.session.roomId)}/ice-servers`,
-        this.withTrailingSlash(this.baseUrl),
-      ),
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${this.sessionTicket}` },
-      },
-    );
-    if (!response.ok)
-      throw new Error(`TURN credential failed (${response.status})`);
-    const parsed = iceServersResponseSchema.safeParse(await response.json());
-    if (!parsed.success) throw new Error("Invalid TURN credential response");
-    this.cachedIceServers = parsed.data.iceServers;
-    return this.cachedIceServers;
   }
 
   private async updatePermissionsFromUi(): Promise<void> {
@@ -697,7 +560,7 @@ export class RemoteManager {
         reject(new Error("Remote ACK timeout"));
       }, 6_000);
       this.pendingRequests.set(message.requestId, { resolve, reject, timer });
-      if (!this.transport?.sendReliable(message)) {
+      if (!this.transport?.send(message)) {
         clearTimeout(timer);
         this.pendingRequests.delete(message.requestId);
         reject(new Error("Remote socket is not open"));
@@ -717,61 +580,16 @@ export class RemoteManager {
     });
   }
 
-  /** WS Relay利用中のcontrollerだけCloudflare経由RTTを測る */
-  private startPings(): void {
-    if (this.pingTimer !== null) return;
-    this.pingTimer = setInterval(() => {
-      if (!this.ready) return;
-      for (const controllerSessionId of this.controllers) {
-        const rtcConnected =
-          this.webRtcByController.get(controllerSessionId)?.connected === true;
-        if (
-          this.connectionMode !== "ws" &&
-          !(this.connectionMode === "auto" && !rtcConnected)
-        )
-          continue;
-        const nonce = crypto.randomUUID();
-        if (
-          this.transport?.sendRealtime({
-            v: 1,
-            type: "ping",
-            controllerSessionId,
-            nonce,
-          })
-        ) {
-          this.pendingPings.set(nonce, {
-            controllerSessionId,
-            sentAt: performance.now(),
-          });
-        }
-      }
-      const cutoff = performance.now() - 10_000;
-      for (const [nonce, ping] of this.pendingPings)
-        if (ping.sentAt < cutoff) this.pendingPings.delete(nonce);
-    }, 1_500);
-  }
-
-  private handleWsPong(controllerSessionId: string, nonce: string): void {
-    const ping = this.pendingPings.get(nonce);
-    if (!ping || ping.controllerSessionId !== controllerSessionId) return;
-    this.pendingPings.delete(nonce);
-    this.setLatency(
-      controllerSessionId,
-      Math.max(0, performance.now() - ping.sentAt),
-    );
-  }
-
   private handleWebRtcLatency(
     controllerSessionId: string,
     rttMs: number,
   ): void {
-    if (this.connectionMode === "ws") return;
     this.setLatency(controllerSessionId, rttMs);
   }
 
   private setLatency(controllerSessionId: string, rttMs: number): void {
     this.rttByController.set(controllerSessionId, rttMs);
-    this.transport?.sendRealtime({
+    this.transport?.send({
       v: 1,
       type: "latency",
       controllerSessionId,
@@ -810,8 +628,6 @@ export class RemoteManager {
   }
 
   private controllerPath(rtc?: ControllerWebRtcState): RemotePath {
-    if (this.connectionMode === "ws") return "WS RELAY";
-    if (this.connectionMode === "auto" && !rtc?.connected) return "WS RELAY";
     return rtc?.path ?? "UNKNOWN";
   }
 
@@ -820,62 +636,23 @@ export class RemoteManager {
       this.controllerPath(this.webRtcByController.get(id)),
     );
     const unique = new Set(paths);
-    const path =
-      unique.size === 0
-        ? this.connectionMode === "ws"
-          ? "WS RELAY"
-          : "UNKNOWN"
-        : unique.size === 1
-          ? paths[0]!
-          : "MIXED";
+    const path = unique.size === 0 ? "UNKNOWN" : unique.size === 1 ? paths[0]! : "MIXED";
     const anyRtc = [...this.webRtcByController.values()].some(
       (state) => state.connected,
     );
     this.ui.webRtcStatus.textContent = `WebRTC ${anyRtc ? "CONNECTED" : "DISCONNECTED"}`;
-    this.ui.transport.textContent =
-      this.connectionMode === "ws"
-        ? "WebSocket"
-        : this.connectionMode === "auto"
-          ? anyRtc
-            ? "WebRTC / WS"
-            : "WebSocket"
-          : "WebRTC";
+    this.ui.transport.textContent = "WebRTC";
     this.ui.path.textContent = path;
-  }
-
-  private updateModeUi(): void {
-    for (const [button, mode] of this.connectionModeButtons()) {
-      const selected = this.connectionMode === mode;
-      button.classList.toggle("selected", selected);
-      button.setAttribute("aria-pressed", String(selected));
-    }
-    this.renderConnectionSummary();
-  }
-
-  /** modeと対応buttonの定義をevent登録とUI更新で共有する */
-  private connectionModeButtons(): Array<[HTMLButtonElement, RemoteConnectionMode]> {
-    return [
-      [this.ui.autoButton, "auto"],
-      [this.ui.directButton, "direct"],
-      [this.ui.turnButton, "turn"],
-      [this.ui.wsButton, "ws"],
-    ];
   }
 
   /** controller peerと表示用connection stateをまとめて破棄する */
   private clearControllerConnections(): void {
-    this.webRtc.setMode("ws", []);
+    this.webRtc.syncControllers([]);
     this.controllers.clear();
     this.rttByController.clear();
     this.webRtcByController.clear();
-    this.pendingPings.clear();
     this.renderConnectionSummary();
     this.renderControllerState();
-  }
-
-  private modeLabel(mode: RemoteConnectionMode): string {
-    if (mode === "ws") return "WS RELAY";
-    return mode.toUpperCase();
   }
 
   private syncPermissionInputs(): void {

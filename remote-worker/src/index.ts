@@ -3,7 +3,6 @@ import { partyserverMiddleware } from "hono-party";
 import { createSecretToken, hashToken } from "./auth";
 import { Room } from "./Room";
 import { hostTicketRequestSchema, joinRequestSchema, roomIdSchema, SESSION_TICKET_TTL_MS } from "./protocol";
-import { generateTurnIceServers } from "./turn";
 
 type AppEnv = { Bindings: Env };
 
@@ -72,14 +71,6 @@ function sessionTicketFromRequest(request: Request): string | null {
   if (matches.length !== 1) return null;
   const ticket = matches[0].slice(TICKET_PROTOCOL_PREFIX.length);
   return /^[A-Za-z0-9_-]{32,256}$/u.test(ticket) ? ticket : null;
-}
-
-/** Authorization BearerからHTTP API用session ticketを取得する */
-function bearerSessionTicket(request: Request): string | null {
-  const header = request.headers.get("Authorization");
-  if (!header || header.length > 384) return null;
-  const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/u.exec(header);
-  return match?.[1] ?? null;
 }
 
 /** 小さいJSON bodyだけをparseしてmemory abuseを防ぐ */
@@ -198,26 +189,6 @@ app.post("/v1/rooms/:roomId/join", async (c) => {
     connectBy: result.connectBy,
     permissions: result.permissions,
   });
-});
-
-/** 認証済みsessionだけに短期Cloudflare TURN ICE credentialsを発行する */
-app.post("/v1/rooms/:roomId/ice-servers", async (c) => {
-  if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "origin_forbidden" }, 403);
-  const roomId = c.req.param("roomId");
-  if (!roomIdSchema.safeParse(roomId).success) return c.json({ error: "invalid_room" }, 400);
-  const ticket = bearerSessionTicket(c.req.raw);
-  if (!ticket) return c.json({ error: "missing_session_ticket" }, 401);
-  const authorization = await c.env.Room.getByName(roomId).authorizeWebSocket(ticket);
-  if (!authorization.ok) return c.json({ error: "forbidden" }, 403);
-  const rate = await c.env.WS_RATE_LIMITER.limit({ key: `turn-credential-room:${roomId}` });
-  if (!rate.success) return c.json({ error: "rate_limited" }, 429);
-  try {
-    const iceServers = await generateTurnIceServers(c.env, 3600);
-    return c.json({ v: 1, iceServers });
-  } catch (error) {
-    console.error(JSON.stringify({ event: "turn_credential_error", message: error instanceof Error ? error.message : "unknown" }));
-    return c.json({ error: "turn_unavailable" }, 503);
-  }
 });
 
 /** OriginとticketをUpgrade前に検証してserver-side identityへ置換する */

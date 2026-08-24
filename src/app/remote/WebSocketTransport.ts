@@ -14,10 +14,8 @@ export interface RemoteTransportEvents {
 
 export interface RemoteTransport {
   readonly isOpen: boolean;
-  /** stale再送禁止のrealtime messageをOPEN時だけ送る */
-  sendRealtime(message: unknown): boolean;
-  /** 呼び出し側が再同期可能なstate messageをOPEN時だけ送る */
-  sendReliable(message: unknown): boolean;
+  /** signaling messageをOPEN時だけ送る */
+  send(message: unknown): boolean;
   /** reconnectを停止してtransportを閉じる */
   close(): void;
 }
@@ -66,13 +64,8 @@ export class WebSocketTransport implements RemoteTransport {
     return this.socket.readyState === 1;
   }
 
-  /** realtime payloadをOPEN時だけ送る */
-  sendRealtime(message: unknown): boolean {
-    return this.sendOnlyWhenOpen(message);
-  }
-
-  /** state payloadをOPEN時だけ送り再接続後は呼び出し側で再同期する */
-  sendReliable(message: unknown): boolean {
+  /** signaling payloadをOPEN時だけ送り再接続後は呼び出し側で再同期する */
+  send(message: unknown): boolean {
     return this.sendOnlyWhenOpen(message);
   }
 

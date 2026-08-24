@@ -13,9 +13,6 @@
 .remote-show { margin-top: 5px; }
 .remote-connection { margin-top: 8px; font-size: 9px; }
 .remote-connection > span { display: block; margin-bottom: 4px; color: rgba(255,255,255,.55); }
-.remote-connection > div { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
-.remote-connection button { min-height: 28px; font-size: 9px; }
-.remote-connection button.selected { border-color: #55d8ff; background: #123441; color: #a9edff; }
 .remote-webrtc-status { margin-top: 5px; font-size: 9px; color: #7fe6ff; }
 .remote-controls fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 8px 0; padding: 7px; border: 1px solid rgba(255,255,255,.15); }
 .remote-controls legend { padding: 0 4px; font-size: 9px; color: rgba(255,255,255,.65); }

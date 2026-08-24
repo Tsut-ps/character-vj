@@ -13,10 +13,6 @@ export interface RemoteHostElements {
   join: HTMLElement;
   startButton: HTMLButtonElement;
   showQrButton: HTMLButtonElement;
-  autoButton: HTMLButtonElement;
-  wsButton: HTMLButtonElement;
-  directButton: HTMLButtonElement;
-  turnButton: HTMLButtonElement;
   webRtcStatus: HTMLElement;
   transport: HTMLElement;
   path: HTMLElement;
@@ -151,10 +147,6 @@ export function createVjUi(host: HTMLElement): VjUiElements {
       join: queryRequired<HTMLElement>(panel, "[data-remote-join]"),
       startButton: queryRequired<HTMLButtonElement>(panel, "[data-action=start-remote]"),
       showQrButton: queryRequired<HTMLButtonElement>(panel, "[data-action=show-qr]"),
-      autoButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=auto]"),
-      wsButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=ws]"),
-      directButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=direct]"),
-      turnButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=turn]"),
       webRtcStatus: queryRequired<HTMLElement>(panel, "[data-remote-webrtc-status]"),
       transport: queryRequired<HTMLElement>(panel, "[data-remote-transport]"),
       path: queryRequired<HTMLElement>(panel, "[data-remote-path]"),

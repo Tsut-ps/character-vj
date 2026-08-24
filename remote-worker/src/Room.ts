@@ -2,27 +2,21 @@ import { Server, type Connection, type ConnectionContext, type WSMessage } from 
 import { constantTimeEqual, createSecretToken, hashToken } from "./auth";
 import {
   controllerMessageSchema,
-  DEFAULT_CONNECTION_MODE,
   DEFAULT_PERMISSIONS,
   hostMessageSchema,
-  isCommandAllowed,
   MAX_ACTIVE_CONTROLLERS,
   MAX_CONTROLLER_SESSIONS,
   MAX_HOST_CONTROL_MESSAGES_PER_MINUTE,
   MAX_HOST_MESSAGES_PER_SECOND,
-  MAX_ROOM_COMMANDS_PER_SECOND,
   PENDING_CONTROLLER_TICKET_TTL_MS,
   parseJsonCandidate,
   payloadWithinLimit,
   permissionsSchema,
-  sequenceIsFresh,
   SESSION_TICKET_TTL_MS,
   signalingMessageSchema,
   signalingPayloadWithinLimit,
-  type ConnectionMode,
   type HostMessage,
   type Permissions,
-  type RemoteEnvelope,
 } from "./protocol";
 import { checkCommandRate } from "./rateLimit";
 
@@ -32,11 +26,8 @@ interface RemoteConnectionState {
   role: Role;
   controllerSessionId?: string;
   sessionExpiresAt: number;
-  permissions: Readonly<Permissions>;
-  lastSeq: number;
   rateStartedAt: number;
   rateCount: number;
-  downCues: readonly number[];
 }
 
 type RoomRow = {
@@ -44,7 +35,6 @@ type RoomRow = {
   join_open: number;
   join_secret_hash: string | null;
   permissions_json: string;
-  connection_mode: string;
   current_host_connection_id: string | null;
   expires_at: number;
 } & Record<string, SqlStorageValue>;
@@ -74,7 +64,6 @@ export interface JoinResult {
 /** 1 remote roomをSQLiteとhibernatable WebSocketで管理する */
 export class Room extends Server<Env> {
   static options = { hibernate: true };
-  private roomRate = { rateStartedAt: 0, rateCount: 0 };
   private hostMessageRate = { rateStartedAt: 0, rateCount: 0 };
   private hostControlRate = { rateStartedAt: 0, rateCount: 0 };
   private schemaReady = false;
@@ -111,10 +100,9 @@ export class Room extends Server<Env> {
     const existing = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM room_state").one().count;
     if (existing > 0) return false;
     this.ctx.storage.sql.exec(
-      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, connection_mode, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, ?, NULL, ?, ?)",
+      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?, ?)",
       hostTokenHash,
       JSON.stringify(DEFAULT_PERMISSIONS),
-      DEFAULT_CONNECTION_MODE,
       now,
       roomExpiresAt,
     );
@@ -172,7 +160,7 @@ export class Room extends Server<Env> {
       const controllerCount = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM controllers").one().count;
       if (controllerCount >= MAX_CONTROLLER_SESSIONS) return false;
       this.ctx.storage.sql.exec(
-        "INSERT INTO controllers (session_id, last_seq, current_connection_id, created_at) VALUES (?, -1, NULL, ?)",
+        "INSERT INTO controllers (session_id, current_connection_id, created_at) VALUES (?, NULL, ?)",
         controllerSessionId,
         now,
       );
@@ -236,11 +224,8 @@ export class Room extends Server<Env> {
       role,
       controllerSessionId: controllerSessionId ?? undefined,
       sessionExpiresAt,
-      permissions,
-      lastSeq: -1,
       rateStartedAt: Date.now(),
       rateCount: 0,
-      downCues: [],
     });
     await this.scheduleSessionAlarm(sessionExpiresAt);
 
@@ -249,12 +234,10 @@ export class Room extends Server<Env> {
       connection.close(4401, "Missing controller identity");
       return;
     } else {
-      const lastSeq = this.connectController(connection, controllerSessionId, sessionExpiresAt);
-      if (lastSeq === null) {
+      if (!this.connectController(connection, controllerSessionId, sessionExpiresAt)) {
         connection.close(4429, "Room controller limit reached");
         return;
       }
-      connection.setState({ ...connection.state!, lastSeq });
     }
 
     this.send(connection, {
@@ -264,7 +247,6 @@ export class Room extends Server<Env> {
       roomId: this.name,
       ...(controllerSessionId ? { controllerSessionId } : {}),
       permissions,
-      connectionMode: this.currentConnectionMode(),
     });
     if (role === "host") this.sendState(connection);
   }
@@ -307,7 +289,7 @@ export class Room extends Server<Env> {
       return;
     }
     if (state.role === "host") await this.handleHostMessage(connection, candidate);
-    else await this.handleControllerMessage(connection, candidate, state, controllerRateAllowed);
+    else this.handleControllerMessage(connection, candidate, state, controllerRateAllowed);
   }
 
   /** current接続だけを切断扱いにしてhostへcontroller解放を通知する */
@@ -327,11 +309,7 @@ export class Room extends Server<Env> {
     if (!state.controllerSessionId) return;
     if (this.currentControllerConnections.get(state.controllerSessionId) !== connection.id) return;
     this.currentControllerConnections.delete(state.controllerSessionId);
-    this.ctx.storage.sql.exec(
-      "UPDATE controllers SET last_seq = ?, current_connection_id = NULL WHERE session_id = ?",
-      state.lastSeq,
-      state.controllerSessionId,
-    );
+    this.ctx.storage.sql.exec("UPDATE controllers SET current_connection_id = NULL WHERE session_id = ?", state.controllerSessionId);
     this.sendToHosts({ v: 1, type: "controllerDisconnected", controllerSessionId: state.controllerSessionId });
   }
 
@@ -381,21 +359,19 @@ export class Room extends Server<Env> {
   }
 
   /** 同じcontroller sessionの旧接続を閉じて接続状態をhostへ通知する */
-  private connectController(connection: Connection<RemoteConnectionState>, controllerSessionId: string, sessionExpiresAt: number): number | null {
+  private connectController(connection: Connection<RemoteConnectionState>, controllerSessionId: string, sessionExpiresAt: number): boolean {
     const activeControllers = new Set(
       [...this.getConnections<RemoteConnectionState>("role:controller")]
         .map((item) => item.state?.controllerSessionId)
         .filter((id): id is string => Boolean(id)),
     );
     activeControllers.add(controllerSessionId);
-    if (activeControllers.size > MAX_ACTIVE_CONTROLLERS) return null;
-    const row = this.ctx.storage.sql.exec<{ last_seq: number; current_connection_id: string | null }>(
-      "SELECT last_seq, current_connection_id FROM controllers WHERE session_id = ?",
+    if (activeControllers.size > MAX_ACTIVE_CONTROLLERS) return false;
+    const row = this.ctx.storage.sql.exec<{ current_connection_id: string | null }>(
+      "SELECT current_connection_id FROM controllers WHERE session_id = ?",
       controllerSessionId,
     ).toArray()[0];
-    if (!row) return null;
-    const previousConnection = row.current_connection_id ? this.getConnection<RemoteConnectionState>(row.current_connection_id) : undefined;
-    const lastSeq = Math.max(row.last_seq, previousConnection?.state?.lastSeq ?? -1);
+    if (!row) return false;
     this.currentControllerConnections.set(controllerSessionId, connection.id);
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
@@ -409,11 +385,11 @@ export class Room extends Server<Env> {
         controllerSessionId,
       );
     });
-    if (row?.current_connection_id && row.current_connection_id !== connection.id) {
+    if (row.current_connection_id && row.current_connection_id !== connection.id) {
       this.getConnection(row.current_connection_id)?.close(4002, "Controller reconnected");
     }
     this.sendToHosts({ v: 1, type: "controllerConnected", controllerSessionId });
-    return lastSeq;
+    return true;
   }
 
   /** host専用controlを処理しcontrollerへ権限をserver側から配布する */
@@ -428,7 +404,7 @@ export class Room extends Server<Env> {
       return;
     }
     const message = result.data;
-    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "setPermissions" || message.type === "setConnectionMode" || message.type === "requestState") {
+    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "setPermissions" || message.type === "requestState") {
       const rate = checkCommandRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
       this.hostControlRate = rate.state;
       if (!rate.allowed) {
@@ -439,26 +415,23 @@ export class Room extends Server<Env> {
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
     else if (message.type === "setPermissions") this.setPermissions(connection, message);
-    else if (message.type === "setConnectionMode") this.setConnectionMode(connection, message);
     else if (message.type === "requestState") {
       this.sendAck(connection, message.requestId, message.type, true);
       this.sendState(connection);
     } else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
       this.sendToController(message.controllerSessionId, message);
-    } else if (message.type === "ping") {
-      this.sendToController(message.controllerSessionId, { v: 1, type: "ping", nonce: message.nonce });
     } else if (message.type === "latency") {
       this.sendToController(message.controllerSessionId, { v: 1, type: "latency", rttMs: message.rttMs });
     }
   }
 
-  /** controller messageへseq、rate、permissionを適用してhostだけへ転送する */
-  private async handleControllerMessage(
+  /** controller signalingをrate制限して現在Hostだけへ転送する */
+  private handleControllerMessage(
     connection: Connection<RemoteConnectionState>,
     candidate: unknown,
     state: Readonly<RemoteConnectionState>,
     controllerRateAllowed: boolean,
-  ): Promise<void> {
+  ): void {
     const result = controllerMessageSchema.safeParse(candidate);
     if (!result.success || !state.controllerSessionId) {
       if (controllerRateAllowed) this.sendError(connection, "forbidden_message", "Controller message schema rejected");
@@ -468,37 +441,7 @@ export class Room extends Server<Env> {
       connection.close(4002, "Controller reconnected");
       return;
     }
-    if ("type" in result.data && result.data.type === "rtcAnswer") {
-      if (controllerRateAllowed) {
-        this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
-      }
-      return;
-    }
-    if ("type" in result.data && result.data.type === "rtcIceCandidate") {
-      if (controllerRateAllowed) {
-        this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
-      }
-      return;
-    }
-    const roomRate = checkCommandRate(this.roomRate, Date.now(), MAX_ROOM_COMMANDS_PER_SECOND);
-    this.roomRate = roomRate.state;
-    if ("type" in result.data && result.data.type === "pong") {
-      if (controllerRateAllowed && roomRate.allowed) {
-        this.sendToHosts({ v: 1, type: "pong", nonce: result.data.nonce, controllerSessionId: state.controllerSessionId });
-      }
-      return;
-    }
-    const envelope = result.data;
-    if (!sequenceIsFresh(envelope.seq, state.lastSeq)) return;
-
-    const cueUpForKnownDown = envelope.command.type === "cue"
-      && envelope.command.state === "up"
-      && state.downCues.includes(envelope.command.cue);
-    const nextDowns = this.nextDownCues(state.downCues, envelope);
-    connection.setState({ ...state, lastSeq: envelope.seq, downCues: nextDowns });
-    if ((!controllerRateAllowed || !roomRate.allowed) && !cueUpForKnownDown) return;
-    if (!isCommandAllowed(envelope.command, state.permissions)) return;
-    this.sendToHosts({ v: 1, type: "remote", controllerSessionId: state.controllerSessionId, envelope });
+    if (controllerRateAllowed) this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
   }
 
   /** OPEN ACK用secretを毎回ローテーションしhashだけを保存する */
@@ -527,31 +470,10 @@ export class Room extends Server<Env> {
       JSON.stringify(message.permissions),
     );
     for (const controller of this.getConnections<RemoteConnectionState>("role:controller")) {
-      const state = controller.state;
-      if (state) controller.setState({ ...state, permissions: message.permissions });
       this.send(controller, { v: 1, type: "permissions", permissions: message.permissions });
     }
     this.sendAck(connection, message.requestId, message.type, true);
     this.sendState(connection);
-  }
-
-  /** Hostが選んだ接続modeを永続化し全Controllerへ配布する */
-  private setConnectionMode(connection: Connection<RemoteConnectionState>, message: Extract<HostMessage, { type: "setConnectionMode" }>): void {
-    this.ctx.storage.sql.exec("UPDATE room_state SET connection_mode = ? WHERE singleton = 1", message.mode);
-    for (const controller of this.getConnections<RemoteConnectionState>("role:controller")) {
-      this.send(controller, { v: 1, type: "connectionMode", mode: message.mode });
-    }
-    this.sendAck(connection, message.requestId, message.type, true);
-    this.sendState(connection);
-  }
-
-  /** cue down集合をmessage順に更新してrate超過時のup解放を判定可能にする */
-  private nextDownCues(current: readonly number[], envelope: RemoteEnvelope): number[] {
-    if (envelope.command.type !== "cue") return [...current];
-    const next = new Set(current);
-    if (envelope.command.state === "down") next.add(envelope.command.cue);
-    else next.delete(envelope.command.cue);
-    return [...next];
   }
 
   /** hostへ現在のjoin、permissions、controller一覧を送る */
@@ -566,7 +488,6 @@ export class Room extends Server<Env> {
       type: "state",
       joinOpen: room.join_open === 1,
       permissions: this.parsePermissions(room.permissions_json),
-      connectionMode: this.parseConnectionMode(room.connection_mode),
       controllers: [...new Set(controllers)].map((controllerSessionId) => ({ controllerSessionId })),
     });
   }
@@ -575,7 +496,7 @@ export class Room extends Server<Env> {
   private sendAck(
     connection: Connection,
     requestId: string,
-    action: "openJoin" | "closeJoin" | "setPermissions" | "setConnectionMode" | "requestState",
+    action: "openJoin" | "closeJoin" | "setPermissions" | "requestState",
     ok: boolean,
     joinSecret?: string,
   ): void {
@@ -629,17 +550,6 @@ export class Room extends Server<Env> {
     }
   }
 
-  /** 永続値を許可済みconnection modeへ検証する */
-  private parseConnectionMode(value: string): ConnectionMode {
-    return value === "auto" || value === "direct" || value === "turn" || value === "ws" ? value : DEFAULT_CONNECTION_MODE;
-  }
-
-  /** 現在Roomのconnection modeを返す */
-  private currentConnectionMode(): ConnectionMode {
-    const room = this.getRoom();
-    return room ? this.parseConnectionMode(room.connection_mode) : DEFAULT_CONNECTION_MODE;
-  }
-
   /** 現在のalarmより早いsession期限だけを登録する */
   private async scheduleSessionAlarm(expiresAt: number): Promise<void> {
     const current = await this.ctx.storage.getAlarm();
@@ -661,7 +571,6 @@ export class Room extends Server<Env> {
     for (const connection of this.getConnections<RemoteConnectionState>()) {
       connection.close(4003, "Session expired");
     }
-    this.roomRate = { rateStartedAt: 0, rateCount: 0 };
     this.hostMessageRate = { rateStartedAt: 0, rateCount: 0 };
     this.hostControlRate = { rateStartedAt: 0, rateCount: 0 };
     this.schemaReady = false;
@@ -673,7 +582,7 @@ export class Room extends Server<Env> {
   /** singleton room rowを取得する */
   private getRoom(): RoomRow | undefined {
     return this.ctx.storage.sql.exec<RoomRow>(
-      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, connection_mode, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
+      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
     ).toArray()[0];
   }
 
@@ -687,7 +596,6 @@ export class Room extends Server<Env> {
         join_open INTEGER NOT NULL DEFAULT 0,
         join_secret_hash TEXT,
         permissions_json TEXT NOT NULL,
-        connection_mode TEXT NOT NULL DEFAULT 'auto',
         current_host_connection_id TEXT,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL DEFAULT 0
@@ -701,7 +609,6 @@ export class Room extends Server<Env> {
       CREATE INDEX IF NOT EXISTS tickets_expires_at ON tickets(expires_at);
       CREATE TABLE IF NOT EXISTS controllers (
         session_id TEXT PRIMARY KEY,
-        last_seq INTEGER NOT NULL DEFAULT -1,
         current_connection_id TEXT,
         created_at INTEGER NOT NULL
       );
@@ -727,10 +634,6 @@ export class Room extends Server<Env> {
       this.ctx.storage.sql.exec("INSERT INTO _sql_schema_migrations (id) VALUES (1)");
     }
     if (schemaVersion < 2) {
-      const modeColumn = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(room_state)")
-        .toArray()
-        .some((column) => column.name === "connection_mode");
-      if (!modeColumn) this.ctx.storage.sql.exec("ALTER TABLE room_state ADD COLUMN connection_mode TEXT NOT NULL DEFAULT 'auto'");
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (2)");
     }
     this.schemaReady = true;

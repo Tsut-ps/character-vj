@@ -203,7 +203,7 @@ describe("Room secret and ticket lifecycle", () => {
       for (let index = 0; index < MAX_CONTROLLER_SESSIONS; index += 1) {
         const sessionId = crypto.randomUUID();
         state.storage.sql.exec(
-          "INSERT INTO controllers (session_id, last_seq, current_connection_id, created_at) VALUES (?, -1, NULL, ?)",
+          "INSERT INTO controllers (session_id, current_connection_id, created_at) VALUES (?, NULL, ?)",
           sessionId,
           Date.now(),
         );

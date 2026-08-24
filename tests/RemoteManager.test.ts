@@ -3,7 +3,7 @@ import test from "node:test";
 import { RemoteInputAdapter } from "../src/app/remote/RemoteInputAdapter.ts";
 import { RemoteManager } from "../src/app/remote/RemoteManager.ts";
 import type { RemoteTransport, WebSocketTransportOptions } from "../src/app/remote/WebSocketTransport.ts";
-import type { RemoteConnectionMode, RemoteEnvelope, RemoteIceServers, RemotePath, ServerMessage } from "../src/app/remote/RemoteProtocol.ts";
+import type { RemoteEnvelope, RemotePath, ServerMessage } from "../src/app/remote/RemoteProtocol.ts";
 import type { RemoteWebRtcHost, WebRtcHostEvents } from "../src/app/remote/WebRtcHost.ts";
 import type { AppAction } from "../src/app/types.ts";
 import type { RemoteHostElements } from "../src/app/ui/createVjUi.ts";
@@ -46,16 +46,11 @@ class FakeTransport implements RemoteTransport {
     this.options = options;
   }
 
-  /** realtime payloadを記録する */
-  sendRealtime(message: unknown): boolean {
+  /** signaling payloadを記録する */
+  send(message: unknown): boolean {
     if (!this.isOpen) return false;
     this.sent.push(message);
     return true;
-  }
-
-  /** state payloadを記録する */
-  sendReliable(message: unknown): boolean {
-    return this.sendRealtime(message);
   }
 
   /** test transportを閉じる */
@@ -77,20 +72,19 @@ class FakeTransport implements RemoteTransport {
 
 class FakeWebRtcHost implements RemoteWebRtcHost {
   readonly events: WebRtcHostEvents;
-  mode: RemoteConnectionMode = "ws";
-  iceServers: RemoteIceServers = [];
+  readonly controllers = new Set<string>();
 
   constructor(events: WebRtcHostEvents) {
     this.events = events;
   }
 
-  setMode(mode: RemoteConnectionMode, _controllerSessionIds: Iterable<string>, iceServers: RemoteIceServers = []): void {
-    this.mode = mode;
-    this.iceServers = iceServers;
+  syncControllers(controllerSessionIds: Iterable<string>): void {
+    this.controllers.clear();
+    for (const controllerSessionId of controllerSessionIds) this.controllers.add(controllerSessionId);
   }
 
-  controllerConnected(_controllerSessionId: string): void {}
-  controllerDisconnected(_controllerSessionId: string): void {}
+  controllerConnected(controllerSessionId: string): void { this.controllers.add(controllerSessionId); }
+  controllerDisconnected(controllerSessionId: string): void { this.controllers.delete(controllerSessionId); }
   async handleAnswer(_message: Extract<ServerMessage, { type: "rtcAnswer" }>): Promise<void> {}
   async handleCandidate(_message: Extract<ServerMessage, { type: "rtcIceCandidate" }>): Promise<void> {}
 
@@ -107,7 +101,7 @@ class FakeWebRtcHost implements RemoteWebRtcHost {
   }
 
   destroy(): void {
-    this.mode = "ws";
+    this.controllers.clear();
   }
 }
 
@@ -136,10 +130,6 @@ function createRemoteUi(): RemoteHostElements {
     join: fakeElement<HTMLElement>(),
     startButton: fakeElement<HTMLButtonElement>(),
     showQrButton: fakeElement<HTMLButtonElement>(),
-    autoButton: fakeElement<HTMLButtonElement>(),
-    wsButton: fakeElement<HTMLButtonElement>(),
-    directButton: fakeElement<HTMLButtonElement>(),
-    turnButton: fakeElement<HTMLButtonElement>(),
     webRtcStatus: fakeElement<HTMLElement>(),
     transport: fakeElement<HTMLElement>(),
     path: fakeElement<HTMLElement>(),
@@ -185,15 +175,6 @@ function createHarness(): ManagerHarness {
     if (new URL(url).pathname === `/v1/rooms/${ROOM_ID}/host-ticket`) {
       return Response.json({ v: 1, roomId: ROOM_ID, sessionTicket: SECOND_TICKET, expiresAt });
     }
-    if (new URL(url).pathname === `/v1/rooms/${ROOM_ID}/ice-servers`) {
-      return Response.json({
-        v: 1,
-        iceServers: [
-          { urls: ["stun:stun.cloudflare.com:3478"] },
-          { urls: ["turn:turn.cloudflare.com:3478?transport=udp"], username: "u", credential: "c" },
-        ],
-      });
-    }
     return Response.json({ error: "not_found" }, { status: 404 });
   };
   const manager = new RemoteManager(
@@ -235,7 +216,6 @@ async function startRemote(harness: ManagerHarness): Promise<FakeTransport> {
     role: "host",
     roomId: ROOM_ID,
     permissions: { cue: true, tapSync: false, record: false, clear: false },
-    connectionMode: "ws",
   });
   await waitFor(() => harness.ui.status.textContent === "ONLINE");
   return transport;
@@ -283,17 +263,12 @@ test("Host切断時はmemory上のtokenからticketを再発行する", async ()
   harness.manager.destroy();
 });
 
-test("replay Remoteを二重発火せずdisconnect時にCueを解放する", async () => {
+test("WebRTC command replayを二重発火せずdisconnect時にCueを解放する", async () => {
   const harness = createHarness();
   const transport = await startRemote(harness);
-  const remote = {
-    v: 1,
-    type: "remote",
-    controllerSessionId: CONTROLLER_ID,
-    envelope: { v: 1, seq: 0, command: { type: "cue", cue: 3, state: "down" } },
-  };
-  transport.receive(remote);
-  transport.receive(remote);
+  const envelope = { v: 1, seq: 0, command: { type: "cue", cue: 3, state: "down" } } as const;
+  harness.webRtc.receive(CONTROLLER_ID, envelope);
+  harness.webRtc.receive(CONTROLLER_ID, envelope);
   transport.receive({ v: 1, type: "controllerDisconnected", controllerSessionId: CONTROLLER_ID });
   assert.deepEqual(
     harness.actions.map((action) => action.type === "cue" ? [action.cue, action.phase] : null),
@@ -304,12 +279,7 @@ test("replay Remoteを二重発火せずdisconnect時にCueを解放する", asy
 
 test("DIRECT peer切断時にControllerのdown中Cueを解放する", async () => {
   const harness = createHarness();
-  const transport = await startRemote(harness);
-  harness.ui.directButton.dispatchEvent(new Event("click"));
-  await waitFor(() => transport.sent.some((message) => typeof message === "object" && message !== null && "type" in message && message.type === "setConnectionMode"));
-  const request = lastMessage(transport, "setConnectionMode");
-  transport.receive({ v: 1, type: "hostAck", requestId: request.requestId, action: "setConnectionMode", ok: true });
-  await waitFor(() => harness.webRtc.mode === "direct");
+  await startRemote(harness);
   harness.webRtc.receive(CONTROLLER_ID, { v: 1, seq: 0, command: { type: "cue", cue: 4, state: "down" } });
   harness.webRtc.state(CONTROLLER_ID, true, "DIRECT");
   harness.webRtc.state(CONTROLLER_ID, false, "DIRECT");
@@ -320,15 +290,10 @@ test("DIRECT peer切断時にControllerのdown中Cueを解放する", async () =
   );
 });
 
-test("TURN modeは短期ICE credentialを取得してWebRTCへ渡す", async () => {
+test("Remote開始時にTURN credential APIを呼ばない", async () => {
   const harness = createHarness();
-  const transport = await startRemote(harness);
-  harness.ui.turnButton.dispatchEvent(new Event("click"));
-  await waitFor(() => transport.sent.some((message) => typeof message === "object" && message !== null && "type" in message && message.type === "setConnectionMode"));
-  const request = lastMessage(transport, "setConnectionMode");
-  transport.receive({ v: 1, type: "hostAck", requestId: request.requestId, action: "setConnectionMode", ok: true });
-  await waitFor(() => harness.webRtc.mode === "turn");
-  assert.ok(harness.fetchCalls.some((call) => call.url.endsWith(`/v1/rooms/${ROOM_ID}/ice-servers`)));
-  assert.ok(harness.webRtc.iceServers.some((server: { urls: string | string[] }) => String(server.urls).includes("turn:")));
+  await startRemote(harness);
+  assert.equal(harness.fetchCalls.some((call) => call.url.endsWith("/ice-servers")), false);
+  assert.equal(harness.ui.transport.textContent, "WebRTC");
   harness.manager.destroy();
 });
