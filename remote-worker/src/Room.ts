@@ -49,7 +49,6 @@ export interface WebSocketAuthorization {
   role?: Role;
   controllerSessionId?: string;
   expiresAt?: number;
-  permissions?: Permissions;
 }
 
 export interface JoinResult {
@@ -98,10 +97,9 @@ export class Room extends Server<Env> {
     const existing = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM room_state").one().count;
     if (existing > 0) return false;
     this.ctx.storage.sql.exec(
-      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?, ?)",
+      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?)",
       hostTokenHash,
       JSON.stringify(permissions),
-      now,
       roomExpiresAt,
     );
     this.ctx.storage.sql.exec(
@@ -193,7 +191,6 @@ export class Room extends Server<Env> {
       role: row.role,
       controllerSessionId: row.controller_session_id ?? undefined,
       expiresAt: row.role === "controller" ? room.expires_at : Math.min(row.expires_at, room.expires_at),
-      permissions: this.parsePermissions(room.permissions_json),
     };
   }
 
@@ -261,7 +258,7 @@ export class Room extends Server<Env> {
       this.hostMessageRate = rate.state;
       if (!rate.allowed) return;
     }
-    const text = this.messageText(message);
+    const text = typeof message === "string" && signalingPayloadWithinLimit(message) ? message : null;
     if (text === null) {
       if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message must be bounded UTF-8 JSON");
       return;
@@ -390,7 +387,7 @@ export class Room extends Server<Env> {
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
     else if (message.type === "requestState") {
-      this.sendAck(connection, message.requestId, message.type, true);
+      this.sendAck(connection, message.requestId, message.type);
       this.sendState(connection);
     } else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
       this.sendToController(message.controllerSessionId, message);
@@ -424,14 +421,14 @@ export class Room extends Server<Env> {
       "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
       secretHash,
     );
-    this.sendAck(connection, requestId, "openJoin", true, joinSecret);
+    this.sendAck(connection, requestId, "openJoin", joinSecret);
     this.sendState(connection);
   }
 
   /** CLOSE ACK前にjoinを閉じて現在secretを即時無効化する */
   private closeJoin(connection: Connection<RemoteConnectionState>, requestId: string): void {
     this.ctx.storage.sql.exec("UPDATE room_state SET join_open = 0, join_secret_hash = NULL WHERE singleton = 1");
-    this.sendAck(connection, requestId, "closeJoin", true);
+    this.sendAck(connection, requestId, "closeJoin");
     this.sendState(connection);
   }
 
@@ -456,10 +453,9 @@ export class Room extends Server<Env> {
     connection: Connection,
     requestId: string,
     action: "openJoin" | "closeJoin" | "requestState",
-    ok: boolean,
     joinSecret?: string,
   ): void {
-    this.send(connection, { v: 1, type: "hostAck", requestId, action, ok, ...(joinSecret ? { joinSecret } : {}) });
+    this.send(connection, { v: 1, type: "hostAck", requestId, action, ok: true, ...(joinSecret ? { joinSecret } : {}) });
   }
 
   /** 現在のhost接続だけへmessageを送り旧hostとcontrollerへの漏洩を防ぐ */
@@ -484,12 +480,6 @@ export class Room extends Server<Env> {
   /** schema拒否理由をidentity情報なしで接続元へ返す */
   private sendError(connection: Connection, code: string, message: string): void {
     this.send(connection, { v: 1, type: "error", code, message });
-  }
-
-  /** binaryとsignaling上限超過messageをJSON parse前に拒否する */
-  private messageText(message: WSMessage): string | null {
-    if (typeof message !== "string") return null;
-    return signalingPayloadWithinLimit(message) ? message : null;
   }
 
   /** room stateの現在permissionsを安全な初期値付きで取得する */
@@ -556,7 +546,6 @@ export class Room extends Server<Env> {
         join_secret_hash TEXT,
         permissions_json TEXT NOT NULL,
         current_host_connection_id TEXT,
-        created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS tickets (
@@ -566,30 +555,7 @@ export class Room extends Server<Env> {
         expires_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS tickets_expires_at ON tickets(expires_at);
-      CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
-        id INTEGER PRIMARY KEY,
-        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
     `);
-    const schemaVersion = this.ctx.storage.sql.exec<{ version: number }>(
-      "SELECT COALESCE(MAX(id), 0) AS version FROM _sql_schema_migrations",
-    ).one().version;
-    if (schemaVersion < 1) {
-      const expiryColumn = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(room_state)")
-        .toArray()
-        .some((column) => column.name === "expires_at");
-      if (!expiryColumn) {
-        this.ctx.storage.sql.exec("ALTER TABLE room_state ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0");
-        this.ctx.storage.sql.exec(
-          "UPDATE room_state SET expires_at = created_at + ? WHERE expires_at = 0",
-          SESSION_TICKET_TTL_MS,
-        );
-      }
-      this.ctx.storage.sql.exec("INSERT INTO _sql_schema_migrations (id) VALUES (1)");
-    }
-    if (schemaVersion < 2) {
-      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (2)");
-    }
     this.schemaReady = true;
   }
 }

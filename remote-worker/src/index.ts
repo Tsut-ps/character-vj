@@ -207,7 +207,7 @@ app.use("*", partyserverMiddleware<AppEnv>({
       ]);
       if (!actorRate.success || !roomRate.success) return new Response("Rate limited", { status: 429 });
       const authorization = await c.env.Room.getByName(lobby.name).authorizeWebSocket(ticket);
-      if (!authorization.ok || !authorization.role || !authorization.permissions || !authorization.expiresAt) {
+      if (!authorization.ok || !authorization.role || !authorization.expiresAt) {
         return new Response("Invalid session ticket", { status: 401 });
       }
 
