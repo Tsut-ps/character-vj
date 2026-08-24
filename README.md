@@ -100,7 +100,7 @@ WorkerとDurable Objectは参加認証、権限配布、接続状態、WebRTCシ
 
 TURNとWebSocket中継へのフォールバックはありません。ネットワーク構成やファイアウォールによって直接接続できない端末では操作できません
 
-初期権限ではキュー1〜9だけを許可します。ホストの `AUDIENCE ALLOW` から `TAP / SYNC`、`RECORD`、`CLEAR` を追加できます
+初期権限ではキュー1〜9だけを許可します。`START REMOTE` の前に `AUDIENCE ALLOW` から `TAP / SYNC`、`RECORD`、`CLEAR` を追加でき、開始後はセッション終了まで固定されます
 
 ## ライセンス
 
