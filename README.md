@@ -94,14 +94,11 @@ npm run dev
 
 VJホストの `REMOTE` → `START REMOTE` で1時間のリモートセッションを開始し、`SHOW QR` から観客のスマートフォンをコントローラーとして接続する
 
-ホストが接続方式を選び、接続済みの全コントローラーへ反映します
+操作データはCloudflare STUNで接続経路を見つけ、ホストと各コントローラー間のWebRTC DataChannelで直接送信します
 
-| 接続方式   | 動作                                                                                                   |
-| ---------- | ------------------------------------------------------------------------------------------------------ |
-| `AUTO`     | WebSocketですぐに操作を開始し、接続できた時点でWebRTCへ切り替え。WebRTCが使えない場合はWebSocketを継続 |
-| `DIRECT`   | STUNのみを使うWebRTC直接接続。自動フォールバックなし                                                   |
-| `TURN`     | Cloudflare Realtime TURNを経由するWebRTC接続                                                           |
-| `WS RELAY` | Cloudflare Workerを経由するWebSocket接続                                                               |
+WorkerとDurable Objectは参加認証、権限配布、接続状態、WebRTCシグナリングだけを扱い、操作データは中継しません
+
+TURNとWebSocket中継へのフォールバックはありません。ネットワーク構成やファイアウォールによって直接接続できない端末では操作できません
 
 初期権限ではキュー1〜9だけを許可します。ホストの `AUDIENCE ALLOW` から `TAP / SYNC`、`RECORD`、`CLEAR` を追加できます
 
