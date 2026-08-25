@@ -6,6 +6,7 @@ import {
   DEFAULT_REMOTE_PERMISSIONS,
   hostTicketResponseSchema,
   parseServerMessage,
+  REMOTE_CONTROLLER_LIMIT,
   remoteSessionTimeoutMs,
   type HostClientMessage,
   type RemotePermissions,
@@ -491,9 +492,6 @@ export class RemoteManager {
       case "ready":
         if (message.role !== "host") return;
         this.ready = true;
-        this.permissions = message.permissions;
-        this.adapter.setPermissions(message.permissions);
-        this.syncPermissionInputs();
         this.renderStatus("ONLINE");
         this.renderRemoteToggle(true);
         this.ui.showQrButton.disabled = false;
@@ -504,11 +502,6 @@ export class RemoteManager {
           waiter.resolve();
           this.readyWaiters.delete(waiter);
         }
-        this.transport?.send({
-          v: 1,
-          type: "requestState",
-          requestId: crypto.randomUUID(),
-        });
         return;
       case "hostAck": {
         const pending = this.pendingRequests.get(message.requestId);
@@ -521,10 +514,6 @@ export class RemoteManager {
       case "state": {
         this.joinOpen = message.joinOpen;
         this.ui.join.textContent = message.joinOpen ? "OPEN" : "CLOSED";
-        this.permissions = message.permissions;
-        this.adapter.setPermissions(message.permissions);
-        this.syncPermissionInputs();
-
         const nextControllers = new Set(
           message.controllers.map(
             (controller) => controller.controllerSessionId,
@@ -644,7 +633,7 @@ export class RemoteManager {
   }
 
   private renderControllerState(): void {
-    this.ui.count.textContent = String(this.controllers.size);
+    this.ui.count.textContent = `${this.controllers.size}/${REMOTE_CONTROLLER_LIMIT}`;
     if (this.controllers.size === 0) {
       this.ui.stats.hidden = true;
       this.ui.stats.replaceChildren();

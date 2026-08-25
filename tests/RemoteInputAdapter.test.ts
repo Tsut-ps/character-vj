@@ -76,7 +76,6 @@ test("20 controllerのstate messageを受信できる", () => {
     v: 1,
     type: "state",
     joinOpen: false,
-    permissions: { cue: true, tapSync: false, record: false, clear: false },
     controllers: Array.from({ length: 20 }, () => ({ controllerSessionId })),
   });
   assert.equal(parseServerMessage(message)?.type, "state");

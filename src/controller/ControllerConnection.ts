@@ -143,8 +143,6 @@ export class ControllerConnection {
     if (message.type === "ready" && message.role === "controller") {
       if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
       this.readyTimer = null;
-      this.commands.setPermissions(message.permissions);
-      this.events.onPermissions(message.permissions);
       this.events.onStatus("connecting");
     } else if (message.type === "rtcOffer" && message.controllerSessionId === this.controllerSessionId) {
       void this.webRtc.handleOffer(message);

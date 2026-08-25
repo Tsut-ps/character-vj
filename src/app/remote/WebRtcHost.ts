@@ -1,5 +1,5 @@
 import {
-  parseRtcDataMessage,
+  parseHostRtcDataMessage,
   type HostClientMessage,
   type RemoteEnvelope,
   type RemoteIceCandidate,
@@ -206,17 +206,12 @@ export class WebRtcHost implements RemoteWebRtcHost {
   /** RemoteEnvelopeとWebRTC RTT ping/pongを同じreliable channel上で処理する */
   private handleData(controllerSessionId: string, peer: HostPeer, data: unknown): void {
     if (this.peers.get(controllerSessionId) !== peer || !this.acceptDataMessage(peer)) return;
-    const message = parseRtcDataMessage(data);
+    const message = parseHostRtcDataMessage(data);
     if (!message) return;
     if (message.type === "remote") {
       this.events.onEnvelope(controllerSessionId, message.envelope);
       return;
     }
-    if (message.type === "ping") {
-      this.sendData(peer, { v: 1, type: "pong", nonce: message.nonce });
-      return;
-    }
-    if (message.type !== "pong") return;
     const sentAt = peer.pendingPings.get(message.nonce);
     if (sentAt === undefined) return;
     peer.pendingPings.delete(message.nonce);

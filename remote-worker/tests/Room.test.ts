@@ -2,7 +2,7 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, createSecretToken, hashToken } from "../src/auth";
 import type { Room } from "../src/Room";
-import { DEFAULT_PERMISSIONS, MAX_CONTROLLER_SESSIONS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
+import { DEFAULT_PERMISSIONS, MAX_CONTROLLERS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
 
 interface Fixture {
   roomId: string;
@@ -62,6 +62,17 @@ describe("Room secret and ticket lifecycle", () => {
     await setJoin(fixture.stub, true, createSecretToken());
     const result = await fixture.stub.joinWithSecret(createSecretToken(), await hashToken(createSecretToken()), crypto.randomUUID(), Date.now() + 60_000);
     expect(result.ok).toBe(false);
+  });
+
+  it("保存permission破損時は全操作を拒否する", async () => {
+    const fixture = await createFixture();
+    const secret = createSecretToken();
+    await setJoin(fixture.stub, true, secret);
+    await runInDurableObject(fixture.stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE room_state SET permissions_json = ? WHERE singleton = 1", "invalid");
+    });
+    const result = await fixture.stub.joinWithSecret(secret, await hashToken(createSecretToken()), crypto.randomUUID(), fixture.expiresAt);
+    expect(result).toEqual({ ok: false, reason: "forbidden" });
   });
 
   it("secretローテーション後に古いQRを拒否する", async () => {
@@ -201,7 +212,7 @@ describe("Room secret and ticket lifecycle", () => {
     const secret = createSecretToken();
     await setJoin(fixture.stub, true, secret);
     await runInDurableObject(fixture.stub, (_instance, state) => {
-      for (let index = 0; index < MAX_CONTROLLER_SESSIONS; index += 1) {
+      for (let index = 0; index < MAX_CONTROLLERS; index += 1) {
         const sessionId = crypto.randomUUID();
         state.storage.sql.exec(
           "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'controller', ?, ?)",

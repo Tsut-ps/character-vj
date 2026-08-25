@@ -233,7 +233,6 @@ async function startRemote(harness: ManagerHarness): Promise<FakeTransport> {
     type: "ready",
     role: "host",
     roomId: ROOM_ID,
-    permissions: { cue: true, tapSync: false, record: false, clear: false },
   });
   await waitFor(() => harness.ui.status.textContent === "● ONLINE");
   assert.equal(harness.ui.startButton.textContent, "ON");
@@ -290,7 +289,7 @@ test("Host ticketの一時失敗後もsession期限内は再接続する", async
   await waitFor(() => harness.transports.length === 2);
   const reconnectCalls = harness.fetchCalls.filter((call) => call.url.endsWith(`/v1/rooms/${ROOM_ID}/host-ticket`));
   assert.equal(reconnectCalls.length, 2);
-  harness.transports[1].receive({ v: 1, type: "ready", role: "host", roomId: ROOM_ID, permissions: { cue: true, tapSync: false, record: false, clear: false } });
+  harness.transports[1].receive({ v: 1, type: "ready", role: "host", roomId: ROOM_ID });
   await waitFor(() => harness.ui.status.textContent === "● ONLINE");
   harness.manager.destroy();
 });
@@ -377,5 +376,14 @@ test("Remote開始時にTURN credential APIを呼ばない", async () => {
   await startRemote(harness);
   assert.equal(harness.fetchCalls.some((call) => call.url.endsWith("/ice-servers")), false);
   assert.equal(harness.ui.transport.textContent, "未接続");
+  harness.manager.destroy();
+});
+
+test("Controller数をroom上限付きで表示する", async () => {
+  const harness = createHarness();
+  const transport = await startRemote(harness);
+  assert.equal(harness.ui.count.textContent, "0/20");
+  transport.receive({ v: 1, type: "controllerConnected", controllerSessionId: CONTROLLER_ID });
+  assert.equal(harness.ui.count.textContent, "1/20");
   harness.manager.destroy();
 });

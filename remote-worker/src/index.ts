@@ -30,7 +30,7 @@ async function corsGuard(c: Context<AppEnv>, next: Next): Promise<Response | voi
       headers: {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "content-type, authorization",
+        "Access-Control-Allow-Headers": "content-type",
         "Access-Control-Max-Age": "600",
         "Vary": "Origin",
       },

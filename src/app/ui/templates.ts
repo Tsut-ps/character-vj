@@ -55,7 +55,7 @@ export const CONTROL_PANEL_HTML = `
   <section class="remote-controls" aria-label="Remote controller settings">
     <div class="remote-head">
       <div class="remote-title"><strong>REMOTE</strong><span data-remote-status data-state="offline">○ OFFLINE</span></div>
-      <span class="remote-count"><b data-remote-count>0</b>台</span>
+      <span class="remote-count"><b data-remote-count>0/20</b></span>
       <button data-action="start-remote" class="remote-toggle" aria-pressed="false">OFF</button>
     </div>
     <div class="remote-session-actions" data-remote-session-actions hidden>

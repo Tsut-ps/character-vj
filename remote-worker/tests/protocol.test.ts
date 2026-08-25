@@ -8,7 +8,7 @@ import {
   signalingPayloadWithinLimit,
   SESSION_TICKET_TTL_MS,
 } from "../src/protocol";
-import { checkCommandRate } from "../src/rateLimit";
+import { checkMessageRate } from "../src/rateLimit";
 
 describe("remote protocol security", () => {
   it("session上限を1時間に固定する", () => {
@@ -61,18 +61,18 @@ describe("remote protocol security", () => {
   it("controller signalingを60 msg/secへ制限する", () => {
     let state = { rateStartedAt: 1000, rateCount: 0 };
     for (let index = 0; index < 60; index += 1) {
-      const result = checkCommandRate(state, 1000);
+      const result = checkMessageRate(state, 1000);
       state = result.state;
       expect(result.allowed).toBe(true);
     }
-    expect(checkCommandRate(state, 1000).allowed).toBe(false);
-    expect(checkCommandRate(state, 2000).allowed).toBe(true);
+    expect(checkMessageRate(state, 1000).allowed).toBe(false);
+    expect(checkMessageRate(state, 2000).allowed).toBe(true);
   });
 
   it("長いrate窓もtimerなしで更新する", () => {
     let state = { rateStartedAt: 1000, rateCount: 0 };
-    for (let index = 0; index < 30; index += 1) state = checkCommandRate(state, 1000, 30, 60_000).state;
-    expect(checkCommandRate(state, 59_000, 30, 60_000).allowed).toBe(false);
-    expect(checkCommandRate(state, 61_000, 30, 60_000).allowed).toBe(true);
+    for (let index = 0; index < 30; index += 1) state = checkMessageRate(state, 1000, 30, 60_000).state;
+    expect(checkMessageRate(state, 59_000, 30, 60_000).allowed).toBe(false);
+    expect(checkMessageRate(state, 61_000, 30, 60_000).allowed).toBe(true);
   });
 });

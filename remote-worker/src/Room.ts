@@ -2,10 +2,8 @@ import { Server, type Connection, type ConnectionContext, type WSMessage } from 
 import { constantTimeEqual, createSecretToken, hashToken } from "./auth";
 import {
   controllerMessageSchema,
-  DEFAULT_PERMISSIONS,
   hostMessageSchema,
-  MAX_ACTIVE_CONTROLLERS,
-  MAX_CONTROLLER_SESSIONS,
+  MAX_CONTROLLERS,
   MAX_HOST_CONTROL_MESSAGES_PER_MINUTE,
   MAX_HOST_MESSAGES_PER_SECOND,
   PENDING_CONTROLLER_TICKET_TTL_MS,
@@ -17,7 +15,7 @@ import {
   signalingPayloadWithinLimit,
   type Permissions,
 } from "./protocol";
-import { checkCommandRate } from "./rateLimit";
+import { checkMessageRate } from "./rateLimit";
 
 type Role = "host" | "controller";
 
@@ -148,12 +146,14 @@ export class Room extends Server<Env> {
     const sessionExpiresAt = Math.min(expiresAt, room.expires_at);
     const ticketExpiresAt = Math.min(sessionExpiresAt, now + PENDING_CONTROLLER_TICKET_TTL_MS);
     if (!Number.isSafeInteger(expiresAt) || sessionExpiresAt <= now) return { ok: false, reason: "forbidden" };
+    const permissions = this.parsePermissions(room.permissions_json);
+    if (!permissions) return { ok: false, reason: "forbidden" };
     const inserted = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at <= ?", now);
       const controllerCount = this.ctx.storage.sql.exec<{ count: number }>(
         "SELECT COUNT(*) AS count FROM tickets WHERE role = 'controller'",
       ).one().count;
-      if (controllerCount >= MAX_CONTROLLER_SESSIONS) return false;
+      if (controllerCount >= MAX_CONTROLLERS) return false;
       this.ctx.storage.sql.exec(
         "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'controller', ?, ?)",
         ticketHash,
@@ -165,7 +165,7 @@ export class Room extends Server<Env> {
     if (!inserted) return { ok: false, reason: "full" };
     return {
       ok: true,
-      permissions: this.parsePermissions(room.permissions_json),
+      permissions,
       expiresAt: sessionExpiresAt,
       connectBy: ticketExpiresAt,
     };
@@ -203,7 +203,6 @@ export class Room extends Server<Env> {
       connection.close(4401, "Unauthorized");
       return;
     }
-    const permissions = this.currentPermissions();
     connection.setState({
       role,
       controllerSessionId: controllerSessionId ?? undefined,
@@ -230,7 +229,6 @@ export class Room extends Server<Env> {
       role,
       roomId: this.name,
       ...(controllerSessionId ? { controllerSessionId } : {}),
-      permissions,
     });
     if (role === "host") this.sendState(connection);
   }
@@ -247,33 +245,32 @@ export class Room extends Server<Env> {
       return;
     }
     let state = initialState;
-    let controllerRateAllowed = true;
     if (state.role === "controller") {
-      const rate = checkCommandRate(state, Date.now());
+      const rate = checkMessageRate(state, Date.now());
       state = { ...state, ...rate.state };
-      controllerRateAllowed = rate.allowed;
       connection.setState(state);
+      if (!rate.allowed) return;
     } else {
-      const rate = checkCommandRate(this.hostMessageRate, Date.now(), MAX_HOST_MESSAGES_PER_SECOND);
+      const rate = checkMessageRate(this.hostMessageRate, Date.now(), MAX_HOST_MESSAGES_PER_SECOND);
       this.hostMessageRate = rate.state;
       if (!rate.allowed) return;
     }
     const text = typeof message === "string" && signalingPayloadWithinLimit(message) ? message : null;
     if (text === null) {
-      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message must be bounded UTF-8 JSON");
+      this.sendError(connection, "invalid_payload", "Message must be bounded UTF-8 JSON");
       return;
     }
     const candidate = parseJsonCandidate(text);
     if (candidate === null) {
-      if (controllerRateAllowed) this.sendError(connection, "malformed_json", "Malformed JSON");
+      this.sendError(connection, "malformed_json", "Malformed JSON");
       return;
     }
     if (!payloadWithinLimit(text) && !signalingMessageSchema.safeParse(candidate).success) {
-      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message exceeds allowed size");
+      this.sendError(connection, "invalid_payload", "Message exceeds allowed size");
       return;
     }
     if (state.role === "host") await this.handleHostMessage(connection, candidate);
-    else this.handleControllerMessage(connection, candidate, state, controllerRateAllowed);
+    else this.handleControllerMessage(connection, candidate, state);
   }
 
   /** current接続だけを切断扱いにしてhostへcontroller解放を通知する */
@@ -349,7 +346,7 @@ export class Room extends Server<Env> {
         .filter((id): id is string => Boolean(id)),
     );
     activeControllers.add(controllerSessionId);
-    if (activeControllers.size > MAX_ACTIVE_CONTROLLERS) return false;
+    if (activeControllers.size > MAX_CONTROLLERS) return false;
     const previousConnectionId = this.currentControllerConnections.get(controllerSessionId);
     this.currentControllerConnections.set(controllerSessionId, connection.id);
     this.ctx.storage.sql.exec(
@@ -376,8 +373,8 @@ export class Room extends Server<Env> {
       return;
     }
     const message = result.data;
-    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "requestState") {
-      const rate = checkCommandRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
+    if (message.type === "openJoin" || message.type === "closeJoin") {
+      const rate = checkMessageRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
       this.hostControlRate = rate.state;
       if (!rate.allowed) {
         this.sendError(connection, "rate_limited", "Host control rate exceeded");
@@ -386,10 +383,7 @@ export class Room extends Server<Env> {
     }
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
-    else if (message.type === "requestState") {
-      this.sendAck(connection, message.requestId, message.type);
-      this.sendState(connection);
-    } else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
+    else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
       this.sendToController(message.controllerSessionId, message);
     }
   }
@@ -399,18 +393,17 @@ export class Room extends Server<Env> {
     connection: Connection<RemoteConnectionState>,
     candidate: unknown,
     state: Readonly<RemoteConnectionState>,
-    controllerRateAllowed: boolean,
   ): void {
     const result = controllerMessageSchema.safeParse(candidate);
     if (!result.success || !state.controllerSessionId) {
-      if (controllerRateAllowed) this.sendError(connection, "forbidden_message", "Controller message schema rejected");
+      this.sendError(connection, "forbidden_message", "Controller message schema rejected");
       return;
     }
     if (this.currentControllerConnections.get(state.controllerSessionId) !== connection.id) {
       connection.close(4002, "Controller reconnected");
       return;
     }
-    if (controllerRateAllowed) this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
+    this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
   }
 
   /** OPEN ACK用secretを毎回ローテーションしhashだけを保存する */
@@ -432,7 +425,7 @@ export class Room extends Server<Env> {
     this.sendState(connection);
   }
 
-  /** hostへ現在のjoin、permissions、controller一覧を送る */
+  /** hostへ現在のjoinとcontroller一覧を送る */
   private sendState(connection: Connection): void {
     const room = this.getRoom();
     if (!room) return;
@@ -443,7 +436,6 @@ export class Room extends Server<Env> {
       v: 1,
       type: "state",
       joinOpen: room.join_open === 1,
-      permissions: this.parsePermissions(room.permissions_json),
       controllers: [...new Set(controllers)].map((controllerSessionId) => ({ controllerSessionId })),
     });
   }
@@ -452,7 +444,7 @@ export class Room extends Server<Env> {
   private sendAck(
     connection: Connection,
     requestId: string,
-    action: "openJoin" | "closeJoin" | "requestState",
+    action: "openJoin" | "closeJoin",
     joinSecret?: string,
   ): void {
     this.send(connection, { v: 1, type: "hostAck", requestId, action, ok: true, ...(joinSecret ? { joinSecret } : {}) });
@@ -482,20 +474,14 @@ export class Room extends Server<Env> {
     this.send(connection, { v: 1, type: "error", code, message });
   }
 
-  /** room stateの現在permissionsを安全な初期値付きで取得する */
-  private currentPermissions(): Permissions {
-    const room = this.getRoom();
-    return room ? this.parsePermissions(room.permissions_json) : { ...DEFAULT_PERMISSIONS };
-  }
-
-  /** 永続JSONをZod検証して破損時は安全な初期権限へ戻す */
-  private parsePermissions(value: string): Permissions {
+  /** 永続permission破損時は全操作をfail closedする */
+  private parsePermissions(value: string): Permissions | null {
     try {
       const parsed: unknown = JSON.parse(value);
       const result = permissionsSchema.safeParse(parsed);
-      return result.success ? result.data : { ...DEFAULT_PERMISSIONS };
+      return result.success ? result.data : null;
     } catch {
-      return { ...DEFAULT_PERMISSIONS };
+      return null;
     }
   }
 

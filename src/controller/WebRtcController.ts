@@ -1,5 +1,5 @@
 import {
-  parseRtcDataMessage,
+  parseControllerRtcDataMessage,
   type ControllerRtcSignal,
   type RemoteEnvelope,
   type RemoteIceCandidate,
@@ -123,9 +123,9 @@ export class WebRtcController {
 
   private handleData(data: unknown): void {
     if (!this.acceptDataMessage()) return;
-    const message = parseRtcDataMessage(data);
+    const message = parseControllerRtcDataMessage(data);
     if (!message) return;
-    if (message.type === "ping") this.sendData({ v: 1, type: "pong", nonce: message.nonce });
+    this.sendData({ v: 1, type: "pong", nonce: message.nonce });
   }
 
   /** schema検証前に過剰なDataChannel frameを落とす */
