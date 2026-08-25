@@ -115,6 +115,11 @@ interface ManagerHarness {
   webRtc: FakeWebRtcHost;
 }
 
+interface HarnessOptions {
+  hostTicketFailures?: number;
+  createQr?: (value: string) => Promise<string>;
+}
+
 /** EventTarget互換の最小HTMLElement test doubleを返す */
 function fakeElement<T extends HTMLElement>(): T {
   return new FakeElement() as unknown as T;
@@ -150,21 +155,23 @@ function createRemoteUi(): RemoteHostElements {
 
 /** async UI handlerが指定状態へ進むまで短時間待つ */
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  const deadline = Date.now() + 1_500;
+  while (Date.now() < deadline) {
     if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for RemoteManager test state");
 }
 
 /** test用APIとtransportを注入したRemoteManagerを作る */
-function createHarness(): ManagerHarness {
+function createHarness(options: HarnessOptions = {}): ManagerHarness {
   const ui = createRemoteUi();
   const transports: FakeTransport[] = [];
   const actions: AppAction[] = [];
   const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
   const qrValues: string[] = [];
   let webRtc: FakeWebRtcHost | null = null;
+  let remainingHostTicketFailures = options.hostTicketFailures ?? 0;
   const expiresAt = Date.now() + 60_000;
   const fetchStub: typeof fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -173,6 +180,10 @@ function createHarness(): ManagerHarness {
       return Response.json({ v: 1, roomId: ROOM_ID, hostToken: HOST_TOKEN, sessionTicket: FIRST_TICKET, expiresAt }, { status: 201 });
     }
     if (new URL(url).pathname === `/v1/rooms/${ROOM_ID}/host-ticket`) {
+      if (remainingHostTicketFailures > 0) {
+        remainingHostTicketFailures -= 1;
+        return Response.json({ error: "temporary" }, { status: 503 });
+      }
       return Response.json({ v: 1, roomId: ROOM_ID, sessionTicket: SECOND_TICKET, expiresAt });
     }
     return Response.json({ error: "not_found" }, { status: 404 });
@@ -192,7 +203,7 @@ function createHarness(): ManagerHarness {
       },
       createQr: async (value) => {
         qrValues.push(value);
-        return "data:image/png;base64,test";
+        return options.createQr?.(value) ?? "data:image/png;base64,test";
       },
       controllerUrl: () => new URL("https://user.github.io/repository/controller.html"),
       webRtcFactory: (events) => {
@@ -269,6 +280,37 @@ test("Host切断時はmemory上のtokenからticketを再発行する", async ()
   if (!reconnectCall) throw new Error("Host ticket refresh was not requested");
   assert.deepEqual(JSON.parse(String(reconnectCall.init?.body)), { hostToken: HOST_TOKEN });
   assert.equal(harness.transports[1].options.sessionTicket, SECOND_TICKET);
+  harness.manager.destroy();
+});
+
+test("Host ticketの一時失敗後もsession期限内は再接続する", async () => {
+  const harness = createHarness({ hostTicketFailures: 1 });
+  const first = await startRemote(harness);
+  first.disconnect();
+  await waitFor(() => harness.transports.length === 2);
+  const reconnectCalls = harness.fetchCalls.filter((call) => call.url.endsWith(`/v1/rooms/${ROOM_ID}/host-ticket`));
+  assert.equal(reconnectCalls.length, 2);
+  harness.transports[1].receive({ v: 1, type: "ready", role: "host", roomId: ROOM_ID, permissions: { cue: true, tapSync: false, record: false, clear: false } });
+  await waitFor(() => harness.ui.status.textContent === "● ONLINE");
+  harness.manager.destroy();
+});
+
+test("QR生成中にsessionを終了しても古いQRを再表示しない", async () => {
+  let resolveQr!: (value: string) => void;
+  const harness = createHarness({
+    createQr: () => new Promise((resolve) => { resolveQr = resolve; }),
+  });
+  const transport = await startRemote(harness);
+  harness.ui.showQrButton.dispatchEvent(new Event("click"));
+  await waitFor(() => transport.sent.some((message) => typeof message === "object" && message !== null && "type" in message && message.type === "openJoin"));
+  const open = lastMessage(transport, "openJoin");
+  transport.receive({ v: 1, type: "hostAck", requestId: open.requestId, action: "openJoin", ok: true, joinSecret: "j".repeat(43) });
+  await waitFor(() => typeof resolveQr === "function");
+  harness.ui.startButton.dispatchEvent(new Event("click"));
+  resolveQr("data:image/png;base64,late");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(harness.ui.qrOverlay.hidden, true);
+  assert.equal(harness.ui.status.textContent, "○ OFFLINE");
   harness.manager.destroy();
 });
 

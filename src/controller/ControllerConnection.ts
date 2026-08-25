@@ -48,12 +48,14 @@ export class ControllerConnection {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ joinSecret }),
     });
+    if (this.destroyed) return;
     if (!response.ok) {
       throw new Error(response.status === 403
         ? "QR expired, JOIN closed, or room expired"
         : `JOIN failed (${response.status})`);
     }
     const parsed = joinRoomResponseSchema.safeParse(await response.json());
+    if (this.destroyed) return;
     if (!parsed.success || parsed.data.roomId !== roomId) throw new Error("Invalid JOIN response");
     this.commands.setPermissions(parsed.data.permissions);
     this.controllerSessionId = parsed.data.controllerSessionId;

@@ -34,7 +34,12 @@ interface ReadyWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
+  transport?: RemoteTransport;
 }
+
+const HOST_RECONNECT_MIN_DELAY_MS = 600;
+const HOST_RECONNECT_MAX_DELAY_MS = 5_000;
+const HOST_READY_TIMEOUT_MS = 5_000;
 
 export interface RemoteManagerDependencies {
   baseUrl?: string;
@@ -74,6 +79,8 @@ export class RemoteManager {
   private readonly readyWaiters = new Set<ReadyWaiter>();
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
+  private lifecycleGeneration = 0;
+  private qrGeneration = 0;
 
   constructor(
     ui: RemoteHostElements,
@@ -157,6 +164,8 @@ export class RemoteManager {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.lifecycleGeneration += 1;
+    this.qrGeneration += 1;
     if (this.ready && this.joinOpen)
       this.transport?.send({
         v: 1,
@@ -199,28 +208,35 @@ export class RemoteManager {
   private async startRemote(): Promise<void> {
     if (this.destroyed || !this.baseUrl || this.session || this.transport)
       return;
+    const generation = ++this.lifecycleGeneration;
     this.renderRemoteToggle(false, true);
     this.setPermissionInputsDisabled(true);
     this.renderStatus("STARTING");
     try {
-      await this.ensureSession();
+      await this.ensureSession(generation);
+      if (!this.isCurrentLifecycle(generation)) return;
       await this.waitUntilReady();
+      if (!this.isCurrentLifecycle(generation)) return;
       this.renderStatus("ONLINE");
       this.ui.showQrButton.disabled = false;
       this.log("REMOTE ONLINE");
     } catch (error) {
+      if (!this.isCurrentLifecycle(generation)) return;
       const message =
         error instanceof Error ? error.message : "Remote start failed";
       this.endSession("ERROR");
       this.log(`REMOTE ERROR / ${message}`);
     } finally {
-      this.renderRemoteToggle(Boolean(this.session));
+      if (this.isCurrentLifecycle(generation))
+        this.renderRemoteToggle(Boolean(this.session));
     }
   }
 
   private async showQr(): Promise<void> {
     if (this.destroyed || !this.ready || !this.session || this.joinVisible)
       return;
+    const session = this.session;
+    const generation = ++this.qrGeneration;
     this.ui.showQrButton.disabled = true;
     try {
       const ack = await this.request({
@@ -228,19 +244,20 @@ export class RemoteManager {
         type: "openJoin",
         requestId: crypto.randomUUID(),
       });
-      if (!ack.ok || !ack.joinSecret || !this.session)
+      if (!this.isCurrentQr(generation, session)) return;
+      if (!ack.ok || !ack.joinSecret)
         throw new Error(ack.error ?? "OPEN JOIN failed");
       this.joinOpen = true;
       this.ui.join.textContent = "OPEN";
       const controllerUrl = this.controllerUrl();
       controllerUrl.hash = new URLSearchParams({
-        room: this.session.roomId,
+        room: session.roomId,
         join: ack.joinSecret,
       }).toString();
       const qrDataUrl = await this.createQr(controllerUrl.toString());
-      if (this.destroyed) return;
+      if (!this.isCurrentQr(generation, session)) return;
       this.ui.qrImage.src = qrDataUrl;
-      this.ui.qrRoom.textContent = `ROOM ${this.session.roomId}`;
+      this.ui.qrRoom.textContent = `ROOM ${session.roomId}`;
       this.ui.qrStatus.textContent = "JOIN OPEN";
       this.ui.qrOverlay.hidden = false;
       this.joinVisible = true;
@@ -248,6 +265,7 @@ export class RemoteManager {
       this.renderStatus("ONLINE");
       this.log("REMOTE JOIN OPEN");
     } catch (error) {
+      if (!this.isCurrentQr(generation, session)) return;
       if (this.joinOpen && this.ready) {
         try {
           await this.request({
@@ -267,12 +285,16 @@ export class RemoteManager {
         `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote connection failed"}`,
       );
     } finally {
-      this.ui.showQrButton.disabled = this.joinVisible || !this.ready;
+      if (this.isCurrentQr(generation, session))
+        this.ui.showQrButton.disabled = this.joinVisible || !this.ready;
     }
   }
 
   private async closeQr(): Promise<void> {
     if (!this.joinVisible || !this.ready) return;
+    const session = this.session;
+    if (!session) return;
+    const generation = ++this.qrGeneration;
     this.ui.closeQrButton.disabled = true;
     this.ui.qrStatus.textContent = "CLOSING JOIN…";
     try {
@@ -281,6 +303,7 @@ export class RemoteManager {
         type: "closeJoin",
         requestId: crypto.randomUUID(),
       });
+      if (!this.isCurrentQr(generation, session)) return;
       if (!ack.ok) throw new Error(ack.error ?? "CLOSE JOIN failed");
       this.joinOpen = false;
       this.ui.join.textContent = "CLOSED";
@@ -288,15 +311,17 @@ export class RemoteManager {
       this.renderStatus("ONLINE");
       this.log("REMOTE JOIN CLOSED");
     } catch (error) {
+      if (!this.isCurrentQr(generation, session)) return;
       this.renderStatus("ERROR");
       this.ui.qrStatus.textContent =
         error instanceof Error ? error.message : "CLOSE FAILED";
     } finally {
-      this.ui.closeQrButton.disabled = false;
+      if (this.isCurrentQr(generation, session))
+        this.ui.closeQrButton.disabled = false;
     }
   }
 
-  private async ensureSession(): Promise<void> {
+  private async ensureSession(generation: number): Promise<void> {
     if (this.transport) return;
     const response = await this.fetchImpl(
       new URL("v1/rooms", this.withTrailingSlash(this.baseUrl)),
@@ -310,6 +335,7 @@ export class RemoteManager {
       throw new Error(`Room create failed (${response.status})`);
     const parsed = createRoomResponseSchema.safeParse(await response.json());
     if (!parsed.success) throw new Error("Invalid room create response");
+    if (!this.isCurrentLifecycle(generation)) return;
     this.session = {
       roomId: parsed.data.roomId,
       hostToken: parsed.data.hostToken,
@@ -319,7 +345,7 @@ export class RemoteManager {
     this.scheduleExpiry(parsed.data.expiresAt);
   }
 
-  private connect(sessionTicket: string): void {
+  private connect(sessionTicket: string): RemoteTransport {
     if (!this.session) throw new Error("Missing room id");
     let transport: RemoteTransport;
     transport = this.transportFactory({
@@ -344,10 +370,12 @@ export class RemoteManager {
       },
     });
     this.transport = transport;
+    return transport;
   }
 
   private handleClose(event: CloseEvent): void {
     if (this.destroyed || !this.transport || !this.session) return;
+    const closedTransport = this.transport;
     if (
       event.code === 4001 ||
       event.code === 4003 ||
@@ -366,6 +394,7 @@ export class RemoteManager {
     this.adapter.releaseAllControllers();
     this.clearControllerConnections();
     this.rejectPending("Remote connection closed");
+    this.rejectReadyWaiters("Remote connection closed", closedTransport);
     this.hideQrView();
     this.renderStatus("RECONNECTING");
     this.ui.showQrButton.disabled = true;
@@ -376,34 +405,46 @@ export class RemoteManager {
     if (this.reconnecting || this.destroyed || !this.session) return;
     this.reconnecting = true;
     const session = this.session;
+    let delayMs = 0;
     try {
-      const response = await this.fetchImpl(
-        new URL(
-          `v1/rooms/${encodeURIComponent(session.roomId)}/host-ticket`,
-          this.withTrailingSlash(this.baseUrl),
-        ),
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ hostToken: session.hostToken }),
-        },
-      );
-      if (!response.ok)
-        throw new Error(`Host reconnect failed (${response.status})`);
-      const parsed = hostTicketResponseSchema.safeParse(await response.json());
-      if (
-        !parsed.success ||
-        parsed.data.roomId !== session.roomId ||
-        this.session !== session
-      )
-        throw new Error("Invalid host ticket response");
-      this.connect(parsed.data.sessionTicket);
-    } catch (error) {
-      if (this.session === session) {
-        this.log(
-          `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote reconnect error"}`,
-        );
-        this.endSession("DISCONNECTED");
+      while (!this.destroyed && this.session === session) {
+        if (delayMs > 0) await this.waitForReconnect(delayMs);
+        if (this.destroyed || this.session !== session) return;
+        try {
+          const response = await this.fetchImpl(
+            new URL(
+              `v1/rooms/${encodeURIComponent(session.roomId)}/host-ticket`,
+              this.withTrailingSlash(this.baseUrl),
+            ),
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ hostToken: session.hostToken }),
+            },
+          );
+          if (response.status === 403 || response.status === 404) {
+            this.endSession("SESSION EXPIRED");
+            return;
+          }
+          if (!response.ok)
+            throw new Error(`Host reconnect failed (${response.status})`);
+          const parsed = hostTicketResponseSchema.safeParse(await response.json());
+          if (!parsed.success || parsed.data.roomId !== session.roomId)
+            throw new Error("Invalid host ticket response");
+          if (this.session !== session) return;
+          const transport = this.connect(parsed.data.sessionTicket);
+          await this.waitUntilReady(HOST_READY_TIMEOUT_MS, transport);
+          return;
+        } catch (error) {
+          if (this.destroyed || this.session !== session) return;
+          this.closeCurrentTransport();
+          this.log(
+            `REMOTE RECONNECT / ${error instanceof Error ? error.message : "Retrying"}`,
+          );
+          delayMs = delayMs === 0
+            ? HOST_RECONNECT_MIN_DELAY_MS
+            : Math.min(delayMs * 2, HOST_RECONNECT_MAX_DELAY_MS);
+        }
       }
     } finally {
       this.reconnecting = false;
@@ -421,6 +462,8 @@ export class RemoteManager {
   }
 
   private endSession(status: string): void {
+    this.lifecycleGeneration += 1;
+    this.qrGeneration += 1;
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
     this.expiryTimer = null;
     this.ready = false;
@@ -456,10 +499,11 @@ export class RemoteManager {
         this.ui.showQrButton.disabled = false;
         this.ui.closeQrButton.disabled = false;
         for (const waiter of this.readyWaiters) {
+          if (waiter.transport && waiter.transport !== this.transport) continue;
           if (waiter.timer !== null) clearTimeout(waiter.timer);
           waiter.resolve();
+          this.readyWaiters.delete(waiter);
         }
-        this.readyWaiters.clear();
         this.transport?.send({
           v: 1,
           type: "requestState",
@@ -569,14 +613,14 @@ export class RemoteManager {
     });
   }
 
-  private waitUntilReady(): Promise<void> {
+  private waitUntilReady(timeoutMs = 8_000, transport?: RemoteTransport): Promise<void> {
     if (this.ready) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      const waiter: ReadyWaiter = { resolve, reject, timer: null };
+      const waiter: ReadyWaiter = { resolve, reject, timer: null, transport };
       waiter.timer = setTimeout(() => {
         this.readyWaiters.delete(waiter);
         reject(new Error("Remote connection timeout"));
-      }, 8_000);
+      }, timeoutMs);
       this.readyWaiters.add(waiter);
     });
   }
@@ -685,11 +729,13 @@ export class RemoteManager {
   }
 
   private hideQrView(): void {
+    this.qrGeneration += 1;
     this.joinVisible = false;
     this.ui.qrOverlay.hidden = true;
     this.ui.qrImage.removeAttribute("src");
     this.ui.showQrButton.textContent = "QRを表示";
     this.ui.showQrButton.disabled = !this.ready;
+    this.ui.closeQrButton.disabled = false;
   }
 
   private rejectPending(message: string): void {
@@ -700,12 +746,34 @@ export class RemoteManager {
     this.pendingRequests.clear();
   }
 
-  private rejectReadyWaiters(message: string): void {
+  private rejectReadyWaiters(message: string, transport?: RemoteTransport): void {
     for (const waiter of this.readyWaiters) {
+      if (transport && waiter.transport !== transport) continue;
       if (waiter.timer !== null) clearTimeout(waiter.timer);
       waiter.reject(new Error(message));
+      this.readyWaiters.delete(waiter);
     }
-    this.readyWaiters.clear();
+  }
+
+  /** 現在transportだけを閉じて再接続の古いeventを無効化する */
+  private closeCurrentTransport(): void {
+    const transport = this.transport;
+    this.transport = null;
+    this.ready = false;
+    transport?.close();
+  }
+
+  /** 再接続の試行間隔をbackoffする */
+  private async waitForReconnect(delayMs: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private isCurrentLifecycle(generation: number): boolean {
+    return !this.destroyed && this.lifecycleGeneration === generation;
+  }
+
+  private isCurrentQr(generation: number, session: NonNullable<RemoteManager["session"]>): boolean {
+    return !this.destroyed && this.qrGeneration === generation && this.session === session;
   }
 
   private withTrailingSlash(value: string): string {
