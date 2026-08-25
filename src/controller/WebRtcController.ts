@@ -17,6 +17,7 @@ const MAX_RTC_MESSAGES_PER_SECOND = 120;
 export interface WebRtcControllerEvents {
   sendSignal(message: ControllerRtcSignal): boolean;
   onState(connected: boolean): void;
+  onFailure(): void;
 }
 
 /** Controller側の単一Host peerとDataChannelを管理する */
@@ -50,17 +51,19 @@ export class WebRtcController {
     connection.addEventListener("connectionstatechange", () => this.handleConnectionState(connection));
     try {
       await connection.setRemoteDescription({ type: "offer", sdp: message.sdp });
+      if (this.connection !== connection) return;
       await this.flushRemoteCandidates(connection);
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
+      if (this.connection !== connection) return;
       const sdp = connection.localDescription?.sdp;
-      if (!sdp || this.connection !== connection || this.rtcSessionId !== message.rtcSessionId || !this.events.sendSignal({
+      if (!sdp || this.rtcSessionId !== message.rtcSessionId || !this.events.sendSignal({
         v: 1,
         type: "rtcAnswer",
         rtcSessionId: message.rtcSessionId,
         sdp,
       })) {
-        this.closePeerOnly();
+        this.closePeerOnly(connection, true);
         return;
       }
       this.answerSent = true;
@@ -68,7 +71,7 @@ export class WebRtcController {
         this.events.sendSignal({ v: 1, type: "rtcIceCandidate", rtcSessionId: message.rtcSessionId, candidate });
       }
     } catch {
-      this.closePeerOnly();
+      this.closePeerOnly(connection, true);
     }
   }
 
@@ -79,7 +82,7 @@ export class WebRtcController {
     if (this.rtcSessionId !== message.rtcSessionId) return;
     if (!connection.remoteDescription) {
       if (this.pendingRemoteCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
-        this.closePeerOnly();
+        this.closePeerOnly(connection, true);
         return;
       }
       this.pendingRemoteCandidates.push(message.candidate);
@@ -88,7 +91,7 @@ export class WebRtcController {
     try {
       await connection.addIceCandidate(message.candidate);
     } catch {
-      this.closePeerOnly();
+      this.closePeerOnly(connection, true);
     }
   }
 
@@ -151,7 +154,7 @@ export class WebRtcController {
     const init = serializeRemoteIceCandidate(candidate);
     if (!this.answerSent) {
       if (this.pendingLocalCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
-        this.closePeerOnly();
+        this.closePeerOnly(connection, true);
         return;
       }
       this.pendingLocalCandidates.push(init);
@@ -162,12 +165,13 @@ export class WebRtcController {
 
   private handleConnectionState(connection: RTCPeerConnection): void {
     if (this.connection !== connection) return;
-    if (connection.connectionState === "failed" || connection.connectionState === "closed") this.closePeerOnly();
+    if (connection.connectionState === "failed" || connection.connectionState === "closed") this.closePeerOnly(connection, true);
   }
 
   private handleChannelClosed(channel: RTCDataChannel): void {
     if (this.channel !== channel) return;
-    this.closePeerOnly();
+    const connection = this.connection;
+    if (connection) this.closePeerOnly(connection, true);
   }
 
   private setConnected(connected: boolean): void {
@@ -180,7 +184,9 @@ export class WebRtcController {
     for (const candidate of this.pendingRemoteCandidates.splice(0)) await connection.addIceCandidate(candidate);
   }
 
-  private closePeerOnly(): void {
+  /** 古いnegotiationが現在のPeerを閉じないよう対象を限定して解放する */
+  private closePeerOnly(expected?: RTCPeerConnection, failed = false): void {
+    if (expected && this.connection !== expected) return;
     const wasConnected = this.connected;
     this.connected = false;
     this.pendingLocalCandidates.length = 0;
@@ -196,5 +202,6 @@ export class WebRtcController {
     try { channel?.close(); } catch { /* noop */ }
     try { connection?.close(); } catch { /* noop */ }
     if (wasConnected) this.events.onState(false);
+    if (failed) this.events.onFailure();
   }
 }

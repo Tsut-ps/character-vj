@@ -89,9 +89,10 @@ export class WebRtcHost implements RemoteWebRtcHost {
     if (!peer || peer.rtcSessionId !== message.rtcSessionId || peer.connection.remoteDescription) return;
     try {
       await peer.connection.setRemoteDescription({ type: "answer", sdp: message.sdp });
+      if (this.peers.get(message.controllerSessionId) !== peer) return;
       await this.flushRemoteCandidates(peer);
     } catch {
-      this.closePeer(message.controllerSessionId);
+      this.closePeer(message.controllerSessionId, peer);
     }
   }
 
@@ -101,7 +102,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
     if (!peer || peer.rtcSessionId !== message.rtcSessionId) return;
     if (!peer.connection.remoteDescription) {
       if (peer.pendingRemoteCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
-        this.closePeer(message.controllerSessionId);
+        this.closePeer(message.controllerSessionId, peer);
         return;
       }
       peer.pendingRemoteCandidates.push(message.candidate);
@@ -110,7 +111,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
     try {
       await peer.connection.addIceCandidate(message.candidate);
     } catch {
-      this.closePeer(message.controllerSessionId);
+      this.closePeer(message.controllerSessionId, peer);
     }
   }
 
@@ -137,8 +138,8 @@ export class WebRtcHost implements RemoteWebRtcHost {
     };
     this.peers.set(controllerSessionId, peer);
     channel.addEventListener("open", () => this.handleOpen(controllerSessionId, peer));
-    channel.addEventListener("close", () => this.closePeer(controllerSessionId));
-    channel.addEventListener("error", () => this.closePeer(controllerSessionId));
+    channel.addEventListener("close", () => this.closePeer(controllerSessionId, peer));
+    channel.addEventListener("error", () => this.closePeer(controllerSessionId, peer));
     channel.addEventListener("message", (event) => this.handleData(controllerSessionId, peer, event.data));
     connection.addEventListener("icecandidate", (event) => this.sendCandidate(controllerSessionId, peer, event.candidate));
     connection.addEventListener("connectionstatechange", () => this.handleConnectionState(controllerSessionId, peer));
@@ -149,6 +150,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
     try {
       const offer = await peer.connection.createOffer();
       await peer.connection.setLocalDescription(offer);
+      if (this.peers.get(controllerSessionId) !== peer) return;
       const sdp = peer.connection.localDescription?.sdp;
       if (!sdp || !this.events.sendSignal({
         v: 1,
@@ -157,7 +159,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
         rtcSessionId: peer.rtcSessionId,
         sdp,
       })) {
-        this.closePeer(controllerSessionId);
+        this.closePeer(controllerSessionId, peer);
         return;
       }
       peer.offerSent = true;
@@ -171,7 +173,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
         });
       }
     } catch {
-      this.closePeer(controllerSessionId);
+      this.closePeer(controllerSessionId, peer);
     }
   }
 
@@ -180,7 +182,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
     const init = serializeRemoteIceCandidate(candidate);
     if (!peer.offerSent) {
       if (peer.pendingLocalCandidates.length >= MAX_PENDING_ICE_CANDIDATES) {
-        this.closePeer(controllerSessionId);
+        this.closePeer(controllerSessionId, peer);
         return;
       }
       peer.pendingLocalCandidates.push(init);
@@ -263,8 +265,9 @@ export class WebRtcHost implements RemoteWebRtcHost {
   }
 
   private handleConnectionState(controllerSessionId: string, peer: HostPeer): void {
+    if (this.peers.get(controllerSessionId) !== peer) return;
     const state = peer.connection.connectionState;
-    if (state === "failed" || state === "closed") this.closePeer(controllerSessionId);
+    if (state === "failed" || state === "closed") this.closePeer(controllerSessionId, peer);
     // transient disconnectedはICEが自然回復できるためfailedまで維持する
   }
 
@@ -272,12 +275,13 @@ export class WebRtcHost implements RemoteWebRtcHost {
     for (const candidate of peer.pendingRemoteCandidates.splice(0)) await peer.connection.addIceCandidate(candidate);
   }
 
-  private closePeer(controllerSessionId: string): void {
+  /** 同じIDの新しいPeerを古い非同期処理から保護して閉じる */
+  private closePeer(controllerSessionId: string, expected?: HostPeer): void {
     const peer = this.peers.get(controllerSessionId);
-    if (!peer) return;
+    if (!peer || (expected && peer !== expected)) return;
     this.peers.delete(controllerSessionId);
     if (peer.pingTimer !== null) clearInterval(peer.pingTimer);
-    if (peer.connected) this.events.onState(controllerSessionId, false);
+    this.events.onState(controllerSessionId, false);
     try { peer.channel.close(); } catch { /* noop */ }
     try { peer.connection.close(); } catch { /* noop */ }
   }

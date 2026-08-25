@@ -34,6 +34,7 @@ export class ControllerConnection {
     this.webRtc = new WebRtcController({
       sendSignal: (message) => this.transport?.send(message) ?? false,
       onState: (connected) => this.events.onWebRtcState(connected),
+      onFailure: () => this.events.onStatus("error", "WebRTC direct connection failed"),
     });
     this.commands = new ControllerCommandSender((envelope) => this.webRtc.send(envelope));
   }
@@ -142,7 +143,7 @@ export class ControllerConnection {
       this.readyTimer = null;
       this.commands.setPermissions(message.permissions);
       this.events.onPermissions(message.permissions);
-      this.events.onStatus("connected");
+      this.events.onStatus("connecting");
     } else if (message.type === "rtcOffer" && message.controllerSessionId === this.controllerSessionId) {
       void this.webRtc.handleOffer(message);
     } else if (message.type === "rtcIceCandidate" && message.controllerSessionId === this.controllerSessionId) {

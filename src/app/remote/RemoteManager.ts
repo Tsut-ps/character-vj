@@ -591,7 +591,10 @@ export class RemoteManager {
     connected: boolean,
   ): void {
     this.webRtcByController.set(controllerSessionId, connected);
-    if (!connected) this.adapter.releaseController(controllerSessionId);
+    if (!connected) {
+      this.rttByController.delete(controllerSessionId);
+      this.adapter.releaseController(controllerSessionId);
+    }
     this.renderConnectionSummary();
     this.renderControllerState();
   }
@@ -608,8 +611,9 @@ export class RemoteManager {
       ...[...this.controllers].map((id, index) => {
         const row = document.createElement("div");
         const rtt = this.rttByController.get(id);
-        const connected = this.webRtcByController.get(id) === true;
-        row.innerHTML = `<b>#${index + 1}</b><span>WebRTC (${connected ? "DIRECT" : "接続中"})</span><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span>`;
+        const state = this.webRtcByController.get(id);
+        const path = state === true ? "DIRECT" : state === false ? "接続失敗" : "接続中";
+        row.innerHTML = `<b>#${index + 1}</b><span>WebRTC (${path})</span><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span>`;
         return row;
       }),
     );
@@ -617,7 +621,8 @@ export class RemoteManager {
 
   private renderConnectionSummary(): void {
     const anyRtc = [...this.webRtcByController.values()].some(Boolean);
-    const state = anyRtc ? "DIRECT" : this.controllers.size > 0 ? "接続中" : "未接続";
+    const failed = [...this.webRtcByController.values()].some((connected) => !connected);
+    const state = anyRtc ? "DIRECT" : failed ? "接続失敗" : this.controllers.size > 0 ? "接続中" : "未接続";
     this.ui.transport.textContent = state;
   }
 

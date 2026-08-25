@@ -144,7 +144,8 @@ export class ControllerApp {
     this.webRtcConnected = connected;
     this.required<HTMLElement>("[data-transport]").textContent = connected ? "接続済み" : "未接続";
     if (!connected) this.releaseLocalPointers();
-    this.applyDisabledState();
+    if (connected) this.setStatus("connected");
+    else this.applyDisabledState();
   }
 
   private applyDisabledState(): void {
