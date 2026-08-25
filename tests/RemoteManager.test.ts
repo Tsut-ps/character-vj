@@ -22,6 +22,8 @@ class FakeElement extends EventTarget {
   checked = false;
   title = "";
   src = "";
+  max = 0;
+  value = 0;
   readonly classList = { toggle: () => false };
 
   /** test対象がQR srcを破棄した状態を再現する */
@@ -35,6 +37,11 @@ class FakeElement extends EventTarget {
   /** test対象のARIA更新を副作用なしで受け取る */
   setAttribute(_name: string, _value: string): void {}
 }
+
+Object.defineProperty(globalThis, "document", {
+  configurable: true,
+  value: { createElement: () => new FakeElement() },
+});
 
 class FakeTransport implements RemoteTransport {
   isOpen = true;
@@ -118,6 +125,7 @@ interface ManagerHarness {
 interface HarnessOptions {
   hostTicketFailures?: number;
   createQr?: (value: string) => Promise<string>;
+  qrTimeoutMs?: number;
 }
 
 /** EventTarget互換の最小HTMLElement test doubleを返す */
@@ -149,6 +157,8 @@ function createRemoteUi(): RemoteHostElements {
     qrImage: fakeElement<HTMLImageElement>(),
     qrRoom: fakeElement<HTMLElement>(),
     qrStatus: fakeElement<HTMLElement>(),
+    qrProgress: fakeElement<HTMLProgressElement>(),
+    qrCountdown: fakeElement<HTMLElement>(),
     closeQrButton: fakeElement<HTMLButtonElement>(),
   };
 }
@@ -210,6 +220,7 @@ function createHarness(options: HarnessOptions = {}): ManagerHarness {
         webRtc = new FakeWebRtcHost(events);
         return webRtc;
       },
+      qrTimeoutMs: options.qrTimeoutMs,
     },
   );
   if (!webRtc) throw new Error("Fake WebRTC host was not created");
@@ -259,6 +270,7 @@ test("openJoin ACK前はQRを表示せずcloseJoin ACK後に閉じる", async ()
   const open = lastMessage(transport, "openJoin");
   transport.receive({ v: 1, type: "hostAck", requestId: open.requestId, action: "openJoin", ok: true, joinSecret: "j".repeat(43) });
   await waitFor(() => harness.ui.qrOverlay.hidden === false);
+  assert.equal(lastMessage(transport, "activateJoin").type, "activateJoin");
   assert.match(harness.qrValues[0], /repository\/controller\.html#room=/u);
 
   harness.ui.closeQrButton.dispatchEvent(new Event("click"));
@@ -266,6 +278,22 @@ test("openJoin ACK前はQRを表示せずcloseJoin ACK後に閉じる", async ()
   assert.equal(harness.ui.qrOverlay.hidden, false);
   transport.receive({ v: 1, type: "hostAck", requestId: close.requestId, action: "closeJoin", ok: true });
   await waitFor(() => harness.ui.qrOverlay.hidden === true);
+  assert.equal(harness.ui.join.textContent, "CLOSED");
+  harness.manager.destroy();
+});
+
+test("QRを表示から30秒相当で閉じてJOIN secretを失効させる", async () => {
+  const harness = createHarness({ qrTimeoutMs: 20 });
+  const transport = await startRemote(harness);
+  harness.ui.showQrButton.dispatchEvent(new Event("click"));
+  await waitFor(() => transport.sent.some((message) => typeof message === "object" && message !== null && "type" in message && message.type === "openJoin"));
+  const open = lastMessage(transport, "openJoin");
+  transport.receive({ v: 1, type: "hostAck", requestId: open.requestId, action: "openJoin", ok: true, joinSecret: "j".repeat(43) });
+  await waitFor(() => harness.ui.qrOverlay.hidden === false);
+  assert.equal(harness.ui.qrProgress.max, 20);
+  assert.ok(harness.ui.qrProgress.value > 0);
+  await waitFor(() => harness.ui.qrOverlay.hidden === true);
+  assert.equal(lastMessage(transport, "closeJoin").type, "closeJoin");
   assert.equal(harness.ui.join.textContent, "CLOSED");
   harness.manager.destroy();
 });

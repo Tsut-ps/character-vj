@@ -7,6 +7,7 @@ import {
   hostTicketResponseSchema,
   parseServerMessage,
   REMOTE_CONTROLLER_LIMIT,
+  REMOTE_JOIN_TIMEOUT_MS,
   remoteSessionTimeoutMs,
   type HostClientMessage,
   type RemotePermissions,
@@ -49,6 +50,7 @@ export interface RemoteManagerDependencies {
   createQr?: (value: string) => Promise<string>;
   controllerUrl?: () => URL;
   webRtcFactory?: WebRtcHostFactory;
+  qrTimeoutMs?: number;
 }
 
 /** Host remote session、QR、permissions、transport、RTTを管理する */
@@ -62,6 +64,7 @@ export class RemoteManager {
   private readonly createQr: (value: string) => Promise<string>;
   private readonly controllerUrl: () => URL;
   private readonly webRtc: RemoteWebRtcHost;
+  private readonly qrTimeoutMs: number;
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
   private session: {
     roomId: string;
@@ -80,6 +83,8 @@ export class RemoteManager {
   private readonly readyWaiters = new Set<ReadyWaiter>();
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
+  private qrGaugeTimer: ReturnType<typeof setInterval> | null = null;
+  private qrExpiryTimer: ReturnType<typeof setTimeout> | null = null;
   private lifecycleGeneration = 0;
   private qrGeneration = 0;
 
@@ -117,6 +122,10 @@ export class RemoteManager {
           `${import.meta.env.BASE_URL}controller.html`,
           window.location.origin,
         ));
+    this.qrTimeoutMs = Math.min(
+      Math.max(1, dependencies.qrTimeoutMs ?? REMOTE_JOIN_TIMEOUT_MS),
+      REMOTE_JOIN_TIMEOUT_MS,
+    );
     const webRtcEvents: WebRtcHostEvents = {
       sendSignal: (message) => this.transport?.send(message) ?? false,
       onEnvelope: (controllerSessionId, envelope) => this.adapter.handle(controllerSessionId, envelope),
@@ -173,10 +182,13 @@ export class RemoteManager {
         type: "closeJoin",
         requestId: crypto.randomUUID(),
       });
+    this.ready = false;
+    this.joinOpen = false;
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
     this.expiryTimer = null;
     this.adapter.resetSession();
     this.webRtc.destroy();
+    this.hideQrView();
     const transport = this.transport;
     this.transport = null;
     transport?.close();
@@ -248,8 +260,6 @@ export class RemoteManager {
       if (!this.isCurrentQr(generation, session)) return;
       if (!ack.ok || !ack.joinSecret)
         throw new Error(ack.error ?? "OPEN JOIN failed");
-      this.joinOpen = true;
-      this.ui.join.textContent = "OPEN";
       const controllerUrl = this.controllerUrl();
       controllerUrl.hash = new URLSearchParams({
         room: session.roomId,
@@ -257,11 +267,16 @@ export class RemoteManager {
       }).toString();
       const qrDataUrl = await this.createQr(controllerUrl.toString());
       if (!this.isCurrentQr(generation, session)) return;
+      if (!this.transport?.send({ v: 1, type: "activateJoin" }))
+        throw new Error("Remote socket is not open");
+      this.joinOpen = true;
+      this.ui.join.textContent = "OPEN";
       this.ui.qrImage.src = qrDataUrl;
       this.ui.qrRoom.textContent = `ROOM ${session.roomId}`;
       this.ui.qrStatus.textContent = "JOIN OPEN";
       this.ui.qrOverlay.hidden = false;
       this.joinVisible = true;
+      this.startQrExpiry(session);
       this.ui.showQrButton.textContent = "QR表示中";
       this.renderStatus("ONLINE");
       this.log("REMOTE JOIN OPEN");
@@ -719,12 +734,53 @@ export class RemoteManager {
 
   private hideQrView(): void {
     this.qrGeneration += 1;
+    this.clearQrTimers();
     this.joinVisible = false;
     this.ui.qrOverlay.hidden = true;
     this.ui.qrImage.removeAttribute("src");
     this.ui.showQrButton.textContent = "QRを表示";
     this.ui.showQrButton.disabled = !this.ready;
     this.ui.closeQrButton.disabled = false;
+    this.ui.qrProgress.max = this.qrTimeoutMs;
+    this.ui.qrProgress.value = this.qrTimeoutMs;
+    this.ui.qrCountdown.textContent = `残り${Math.ceil(this.qrTimeoutMs / 1_000)}秒`;
+  }
+
+  /** QR表示から固定時間後にJOINを閉じる */
+  private startQrExpiry(session: NonNullable<RemoteManager["session"]>): void {
+    this.clearQrTimers();
+    const expiresAt = Date.now() + this.qrTimeoutMs;
+    const render = (): void => {
+      const remaining = Math.max(0, expiresAt - Date.now());
+      this.ui.qrProgress.max = this.qrTimeoutMs;
+      this.ui.qrProgress.value = remaining;
+      this.ui.qrCountdown.textContent = `残り${Math.ceil(remaining / 1_000)}秒`;
+    };
+    render();
+    this.qrGaugeTimer = setInterval(render, 100);
+    this.qrExpiryTimer = setTimeout(() => this.expireQr(session), this.qrTimeoutMs);
+  }
+
+  /** 表示期限に達したQRを即時非表示にしてserver側JOINも閉じる */
+  private expireQr(session: NonNullable<RemoteManager["session"]>): void {
+    if (this.destroyed || this.session !== session || !this.joinVisible) return;
+    const closeRequest = this.ready && this.joinOpen
+      ? this.request({ v: 1, type: "closeJoin", requestId: crypto.randomUUID() })
+      : null;
+    this.joinOpen = false;
+    this.ui.join.textContent = "CLOSED";
+    this.hideQrView();
+    this.renderStatus("ONLINE");
+    this.log("REMOTE JOIN EXPIRED");
+    void closeRequest?.catch(() => undefined);
+  }
+
+  /** QR用intervalとtimeoutをまとめて解放する */
+  private clearQrTimers(): void {
+    if (this.qrGaugeTimer !== null) clearInterval(this.qrGaugeTimer);
+    if (this.qrExpiryTimer !== null) clearTimeout(this.qrExpiryTimer);
+    this.qrGaugeTimer = null;
+    this.qrExpiryTimer = null;
   }
 
   private rejectPending(message: string): void {

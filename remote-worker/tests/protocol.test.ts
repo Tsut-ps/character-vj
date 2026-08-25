@@ -24,6 +24,7 @@ describe("remote protocol security", () => {
       command: { type: "cue", cue: 1, state: "down" },
     }).success).toBe(false);
     expect(hostMessageSchema.safeParse({ v: 1, type: "openJoin", requestId }).success).toBe(true);
+    expect(hostMessageSchema.safeParse({ v: 1, type: "activateJoin" }).success).toBe(true);
   });
 
   it("WebRTC signalingのrole方向とidentityを固定する", () => {

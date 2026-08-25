@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { createSecretToken, hashToken } from "../src/auth";
-import { DEFAULT_PERMISSIONS } from "../src/protocol";
+import { DEFAULT_PERMISSIONS, JOIN_TIMEOUT_MS } from "../src/protocol";
 
 /** WebSocket closeをtimeout付きで待つ */
 function waitForClose(socket: WebSocket): Promise<CloseEvent> {
@@ -119,6 +119,42 @@ describe("Worker edge security", () => {
     expect(response.status).toBe(204);
     expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://tsut-ps.github.io");
     expect(response.headers.get("Access-Control-Allow-Origin")).not.toBe("*");
+    expect(response.headers.get("Access-Control-Allow-Headers")).toBe("content-type");
+  });
+
+  it("QR生成後のactivateから30秒だけJOINを開く", async () => {
+    const roomId = crypto.randomUUID();
+    const hostToken = createSecretToken();
+    const hostTicket = createSecretToken();
+    const stub = env.Room.getByName(roomId);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), Date.now() + 60_000, DEFAULT_PERMISSIONS);
+    const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
+    const host = response.webSocket!;
+    const ready = waitForMessage(host, (message) => message.type === "ready");
+    host.accept();
+    await ready;
+    const requestId = crypto.randomUUID();
+    const ack = waitForMessage(host, (message) => message.type === "hostAck" && message.requestId === requestId);
+    host.send(JSON.stringify({ v: 1, type: "openJoin", requestId }));
+    expect(await ack).toMatchObject({ action: "openJoin", ok: true });
+    await runInDurableObject(stub, (_instance, state) => {
+      const room = state.storage.sql.exec<{ join_open: number; join_expires_at: number | null }>(
+        "SELECT join_open, join_expires_at FROM room_state WHERE singleton = 1",
+      ).one();
+      expect(room).toEqual({ join_open: 0, join_expires_at: null });
+    });
+    const activatedAt = Date.now();
+    const opened = waitForMessage(host, (message) => message.type === "state" && message.joinOpen === true);
+    host.send(JSON.stringify({ v: 1, type: "activateJoin" }));
+    await opened;
+    await runInDurableObject(stub, (_instance, state) => {
+      const room = state.storage.sql.exec<{ join_expires_at: number }>(
+        "SELECT join_expires_at FROM room_state WHERE singleton = 1",
+      ).one();
+      expect(room.join_expires_at).toBeGreaterThanOrEqual(activatedAt + JOIN_TIMEOUT_MS);
+      expect(room.join_expires_at).toBeLessThanOrEqual(Date.now() + JOIN_TIMEOUT_MS);
+    });
+    host.close(1000, "done");
   });
 
   it("session期限で接続中WebSocketを終了する", async () => {
@@ -186,8 +222,9 @@ describe("Worker edge security", () => {
     const joinSecret = createSecretToken();
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
-        "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+        "UPDATE room_state SET join_open = 1, join_secret_hash = ?, join_expires_at = ? WHERE singleton = 1",
         await hashToken(joinSecret),
+        Date.now() + 30_000,
       );
     });
     expect((await stub.joinWithSecret(
@@ -228,8 +265,9 @@ describe("Worker edge security", () => {
     const joinSecret = createSecretToken();
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
-        "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+        "UPDATE room_state SET join_open = 1, join_secret_hash = ?, join_expires_at = ? WHERE singleton = 1",
         await hashToken(joinSecret),
+        Date.now() + 30_000,
       );
     });
     expect((await stub.joinWithSecret(

@@ -3,6 +3,7 @@ import { constantTimeEqual, createSecretToken, hashToken } from "./auth";
 import {
   controllerMessageSchema,
   hostMessageSchema,
+  JOIN_TIMEOUT_MS,
   MAX_CONTROLLERS,
   MAX_HOST_CONTROL_MESSAGES_PER_MINUTE,
   MAX_HOST_MESSAGES_PER_SECOND,
@@ -31,6 +32,7 @@ type RoomRow = {
   host_token_hash: string;
   join_open: number;
   join_secret_hash: string | null;
+  join_expires_at: number | null;
   permissions_json: string;
   current_host_connection_id: string | null;
   expires_at: number;
@@ -82,7 +84,9 @@ export class Room extends Server<Env> {
       const controllerSessionId = connection.state?.controllerSessionId;
       if (controllerSessionId) this.currentControllerConnections.set(controllerSessionId, connection.id);
     }
-    await this.scheduleSessionAlarm(room.expires_at);
+    await this.scheduleSessionAlarm(
+      room.join_open === 1 && room.join_expires_at ? Math.min(room.expires_at, room.join_expires_at) : room.expires_at,
+    );
   }
 
   /** 新規roomのhashと絶対期限を保存する */
@@ -95,7 +99,7 @@ export class Room extends Server<Env> {
     const existing = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM room_state").one().count;
     if (existing > 0) return false;
     this.ctx.storage.sql.exec(
-      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?)",
+      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, join_expires_at, permissions_json, current_host_connection_id, expires_at) VALUES (1, ?, 0, NULL, NULL, ?, NULL, ?)",
       hostTokenHash,
       JSON.stringify(permissions),
       roomExpiresAt,
@@ -139,7 +143,14 @@ export class Room extends Server<Env> {
     const room = await this.getActiveRoom();
     if (!room) return { ok: false, reason: "forbidden" };
     const candidateHash = await hashToken(joinSecret);
-    if (room.expires_at <= Date.now() || room.join_open !== 1 || !room.join_secret_hash || !constantTimeEqual(room.join_secret_hash, candidateHash)) {
+    if (
+      room.expires_at <= Date.now() ||
+      room.join_open !== 1 ||
+      !room.join_secret_hash ||
+      !room.join_expires_at ||
+      room.join_expires_at <= Date.now() ||
+      !constantTimeEqual(room.join_secret_hash, candidateHash)
+    ) {
       return { ok: false, reason: "forbidden" };
     }
     const now = Date.now();
@@ -282,7 +293,7 @@ export class Room extends Server<Env> {
       if (this.currentHostConnectionId === connection.id) {
         this.currentHostConnectionId = null;
         this.ctx.storage.sql.exec(
-          "UPDATE room_state SET current_host_connection_id = NULL, join_open = 0, join_secret_hash = NULL WHERE singleton = 1",
+          "UPDATE room_state SET current_host_connection_id = NULL, join_open = 0, join_secret_hash = NULL, join_expires_at = NULL WHERE singleton = 1",
         );
       }
       return;
@@ -293,19 +304,25 @@ export class Room extends Server<Env> {
     this.sendToHosts({ v: 1, type: "controllerDisconnected", controllerSessionId: state.controllerSessionId });
   }
 
-  /** 期限切れconnectionを閉じて次のsession期限だけをalarmへ登録する */
+  /** JOINとconnectionの次の期限をalarmへ登録する */
   async onAlarm(): Promise<void> {
     const now = Date.now();
     const room = await this.getActiveRoom(now);
     if (!room) return;
     let nextExpiry = room.expires_at;
+    if (room.join_open === 1 && (!room.join_expires_at || room.join_expires_at <= now)) {
+      this.clearJoinState();
+      this.sendStateToHost();
+    } else if (room.join_open === 1 && room.join_expires_at) {
+      nextExpiry = Math.min(nextExpiry, room.join_expires_at);
+    }
     for (const connection of this.getConnections<RemoteConnectionState>()) {
       const state = connection.state;
       if (!state) continue;
       if (state.sessionExpiresAt <= now) {
         if (state.role === "host" && room.current_host_connection_id === connection.id) {
           this.ctx.storage.sql.exec(
-            "UPDATE room_state SET current_host_connection_id = NULL, join_open = 0, join_secret_hash = NULL WHERE singleton = 1",
+            "UPDATE room_state SET current_host_connection_id = NULL, join_open = 0, join_secret_hash = NULL, join_expires_at = NULL WHERE singleton = 1",
           );
         }
         connection.close(4003, "Session expired");
@@ -331,7 +348,7 @@ export class Room extends Server<Env> {
     const room = this.getRoom();
     this.currentHostConnectionId = connection.id;
     this.ctx.storage.sql.exec(
-      "UPDATE room_state SET current_host_connection_id = ?, join_open = 0, join_secret_hash = NULL WHERE singleton = 1",
+      "UPDATE room_state SET current_host_connection_id = ?, join_open = 0, join_secret_hash = NULL, join_expires_at = NULL WHERE singleton = 1",
       connection.id,
     );
     if (!room?.current_host_connection_id || room.current_host_connection_id === connection.id) return;
@@ -373,7 +390,7 @@ export class Room extends Server<Env> {
       return;
     }
     const message = result.data;
-    if (message.type === "openJoin" || message.type === "closeJoin") {
+    if (message.type === "openJoin" || message.type === "activateJoin" || message.type === "closeJoin") {
       const rate = checkMessageRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
       this.hostControlRate = rate.state;
       if (!rate.allowed) {
@@ -382,6 +399,7 @@ export class Room extends Server<Env> {
       }
     }
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
+    else if (message.type === "activateJoin") await this.activateJoin();
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
     else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
       this.sendToController(message.controllerSessionId, message);
@@ -406,21 +424,33 @@ export class Room extends Server<Env> {
     this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
   }
 
-  /** OPEN ACK用secretを毎回ローテーションしhashだけを保存する */
+  /** QR生成用secretをローテーションし表示前はJOINを閉じておく */
   private async openJoin(connection: Connection<RemoteConnectionState>, requestId: string): Promise<void> {
     const joinSecret = createSecretToken();
     const secretHash = await hashToken(joinSecret);
     this.ctx.storage.sql.exec(
-      "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+      "UPDATE room_state SET join_open = 0, join_secret_hash = ?, join_expires_at = NULL WHERE singleton = 1",
       secretHash,
     );
     this.sendAck(connection, requestId, "openJoin", joinSecret);
-    this.sendState(connection);
+  }
+
+  /** QR表示から30秒だけJOINを有効化する */
+  private async activateJoin(): Promise<void> {
+    const room = this.getRoom();
+    if (!room?.join_secret_hash) return;
+    const expiresAt = Math.min(room.expires_at, Date.now() + JOIN_TIMEOUT_MS);
+    this.ctx.storage.sql.exec(
+      "UPDATE room_state SET join_open = 1, join_expires_at = ? WHERE singleton = 1",
+      expiresAt,
+    );
+    await this.scheduleSessionAlarm(expiresAt);
+    this.sendStateToHost();
   }
 
   /** CLOSE ACK前にjoinを閉じて現在secretを即時無効化する */
   private closeJoin(connection: Connection<RemoteConnectionState>, requestId: string): void {
-    this.ctx.storage.sql.exec("UPDATE room_state SET join_open = 0, join_secret_hash = NULL WHERE singleton = 1");
+    this.clearJoinState();
     this.sendAck(connection, requestId, "closeJoin");
     this.sendState(connection);
   }
@@ -435,7 +465,7 @@ export class Room extends Server<Env> {
     this.send(connection, {
       v: 1,
       type: "state",
-      joinOpen: room.join_open === 1,
+      joinOpen: room.join_open === 1 && Boolean(room.join_expires_at && room.join_expires_at > Date.now()),
       controllers: [...new Set(controllers)].map((controllerSessionId) => ({ controllerSessionId })),
     });
   }
@@ -455,6 +485,20 @@ export class Room extends Server<Env> {
     if (!this.currentHostConnectionId) return;
     const host = this.getConnection(this.currentHostConnectionId);
     if (host) this.send(host, message);
+  }
+
+  /** 現在Hostへ最新stateを送る */
+  private sendStateToHost(): void {
+    if (!this.currentHostConnectionId) return;
+    const host = this.getConnection(this.currentHostConnectionId);
+    if (host) this.sendState(host);
+  }
+
+  /** JOIN secretと期限を同時に失効させる */
+  private clearJoinState(): void {
+    this.ctx.storage.sql.exec(
+      "UPDATE room_state SET join_open = 0, join_secret_hash = NULL, join_expires_at = NULL WHERE singleton = 1",
+    );
   }
 
   /** 指定controller sessionだけへmessageを送る */
@@ -517,7 +561,7 @@ export class Room extends Server<Env> {
   /** singleton room rowを取得する */
   private getRoom(): RoomRow | undefined {
     return this.ctx.storage.sql.exec<RoomRow>(
-      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
+      "SELECT host_token_hash, join_open, join_secret_hash, join_expires_at, permissions_json, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
     ).toArray()[0];
   }
 
@@ -530,6 +574,7 @@ export class Room extends Server<Env> {
         host_token_hash TEXT NOT NULL,
         join_open INTEGER NOT NULL DEFAULT 0,
         join_secret_hash TEXT,
+        join_expires_at INTEGER,
         permissions_json TEXT NOT NULL,
         current_host_connection_id TEXT,
         expires_at INTEGER NOT NULL DEFAULT 0
@@ -542,6 +587,10 @@ export class Room extends Server<Env> {
       );
       CREATE INDEX IF NOT EXISTS tickets_expires_at ON tickets(expires_at);
     `);
+    const columns = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(room_state)").toArray();
+    if (!columns.some((column) => column.name === "join_expires_at")) {
+      this.ctx.storage.sql.exec("ALTER TABLE room_state ADD COLUMN join_expires_at INTEGER");
+    }
     this.schemaReady = true;
   }
 }

@@ -98,6 +98,7 @@ export const REMOTE_QR_HTML = `
     <p>Scan to join as an audience controller</p>
     <img data-remote-qr alt="Character VJ controller QR code">
     <small data-remote-room></small>
+    <div class="remote-qr-expiry"><progress data-remote-qr-progress max="30000" value="30000"></progress><span data-remote-qr-countdown>残り30秒</span></div>
     <div data-remote-qr-status>OPENING JOIN…</div>
   </div>
 `;

@@ -22,6 +22,8 @@ export interface RemoteHostElements {
   qrImage: HTMLImageElement;
   qrRoom: HTMLElement;
   qrStatus: HTMLElement;
+  qrProgress: HTMLProgressElement;
+  qrCountdown: HTMLElement;
   closeQrButton: HTMLButtonElement;
 }
 
@@ -161,6 +163,8 @@ export function createVjUi(host: HTMLElement): VjUiElements {
       qrImage: queryRequired<HTMLImageElement>(remoteQrOverlay, "[data-remote-qr]"),
       qrRoom: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-room]"),
       qrStatus: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-qr-status]"),
+      qrProgress: queryRequired<HTMLProgressElement>(remoteQrOverlay, "[data-remote-qr-progress]"),
+      qrCountdown: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-qr-countdown]"),
       closeQrButton: queryRequired<HTMLButtonElement>(remoteQrOverlay, "[data-action=close-remote-qr]"),
     },
   };

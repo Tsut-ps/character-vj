@@ -5,6 +5,7 @@ export const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
 export const SESSION_TICKET_TTL_MS = 60 * 60 * 1000;
 export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
 export const MAX_CONTROLLERS = 20;
+export const JOIN_TIMEOUT_MS = 30_000;
 export const MAX_HOST_MESSAGES_PER_SECOND = 300;
 export const MAX_HOST_CONTROL_MESSAGES_PER_MINUTE = 30;
 
@@ -67,6 +68,7 @@ export const controllerMessageSchema = z.union([
 
 export const hostMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("activateJoin") }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
   hostRtcOfferSchema,
   hostRtcCandidateSchema,

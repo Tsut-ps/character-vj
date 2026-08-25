@@ -5,6 +5,7 @@ const REMOTE_SERVER_MESSAGE_MAX_BYTES = 64 * 1024;
 const REMOTE_RTC_DATA_MAX_BYTES = 2048;
 export const REMOTE_ROOM_RATE_LIMIT = 600;
 export const REMOTE_CONTROLLER_LIMIT = 20;
+export const REMOTE_JOIN_TIMEOUT_MS = 30_000;
 export const REMOTE_TICKET_PROTOCOL_PREFIX = "cvj-ticket.";
 export const REMOTE_SESSION_MAX_MS = 60 * 60 * 1000;
 export const REMOTE_INITIAL_CONNECT_MAX_MS = 60 * 1000;
@@ -70,6 +71,7 @@ export type ControllerRtcSignal =
 
 const hostClientMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("activateJoin") }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
   z.object({
     v: z.literal(1),
