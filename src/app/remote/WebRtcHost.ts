@@ -205,7 +205,11 @@ export class WebRtcHost implements RemoteWebRtcHost {
 
   /** RemoteEnvelopeとWebRTC RTT ping/pongを同じreliable channel上で処理する */
   private handleData(controllerSessionId: string, peer: HostPeer, data: unknown): void {
-    if (this.peers.get(controllerSessionId) !== peer || !this.acceptDataMessage(peer)) return;
+    if (this.peers.get(controllerSessionId) !== peer) return;
+    if (!this.acceptDataMessage(peer)) {
+      this.closePeer(controllerSessionId, peer);
+      return;
+    }
     const message = parseHostRtcDataMessage(data);
     if (!message) return;
     if (message.type === "remote") {
@@ -219,7 +223,7 @@ export class WebRtcHost implements RemoteWebRtcHost {
     this.events.onLatency(controllerSessionId, rttMs);
   }
 
-  /** schema検証前に過剰なDataChannel frameを落とす */
+  /** schema検証前に過剰なDataChannel frameを検出する */
   private acceptDataMessage(peer: HostPeer): boolean {
     const now = performance.now();
     if (now - peer.rateStartedAt >= 1_000) {

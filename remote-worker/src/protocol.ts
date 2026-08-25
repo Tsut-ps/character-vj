@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const MAX_CLIENT_MESSAGE_BYTES = 1024;
-export const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
+const MAX_CLIENT_MESSAGE_BYTES = 1024;
+const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
 export const SESSION_TICKET_TTL_MS = 60 * 60 * 1000;
 export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
 export const MAX_CONTROLLERS = 20;
@@ -27,7 +27,7 @@ export const DEFAULT_PERMISSIONS: Permissions = {
 
 const rtcSdpSchema = z.string().min(1).max(20_000);
 const rtcSessionIdSchema = z.string().uuid();
-export const rtcIceCandidateSchema = z.object({
+const rtcIceCandidateSchema = z.object({
   candidate: z.string().max(4_096),
   sdpMid: z.string().max(256).nullable().optional(),
   sdpMLineIndex: z.number().int().nonnegative().max(65_535).nullable().optional(),

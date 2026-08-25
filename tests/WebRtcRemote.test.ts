@@ -114,3 +114,22 @@ test("古いController offerの完了は新しいpeerを閉じない", async () 
   assert.equal(second.closed, false);
   controller.close();
 });
+
+test("ControllerのDataChannel floodは上限超過時にPeerを閉じる", async () => {
+  const peer = new FakePeerConnection();
+  const host = new WebRtcHost({
+    sendSignal: () => true,
+    onEnvelope: () => {},
+    onState: () => {},
+    onLatency: () => {},
+  }, asPeerFactory([peer]));
+  host.controllerConnected(crypto.randomUUID());
+  await Promise.resolve();
+  for (let index = 0; index <= 120; index += 1) {
+    peer.channel.dispatchEvent(new MessageEvent("message", {
+      data: JSON.stringify({ v: 1, type: "pong", nonce: crypto.randomUUID() }),
+    }));
+  }
+  assert.equal(peer.closed, true);
+  host.destroy();
+});

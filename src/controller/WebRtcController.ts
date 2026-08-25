@@ -122,13 +122,17 @@ export class WebRtcController {
   }
 
   private handleData(data: unknown): void {
-    if (!this.acceptDataMessage()) return;
+    if (!this.acceptDataMessage()) {
+      const connection = this.connection;
+      if (connection) this.closePeerOnly(connection, true);
+      return;
+    }
     const message = parseControllerRtcDataMessage(data);
     if (!message) return;
     this.sendData({ v: 1, type: "pong", nonce: message.nonce });
   }
 
-  /** schema検証前に過剰なDataChannel frameを落とす */
+  /** schema検証前に過剰なDataChannel frameを検出する */
   private acceptDataMessage(): boolean {
     const now = performance.now();
     if (now - this.rateStartedAt >= 1_000) {

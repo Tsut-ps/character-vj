@@ -1,9 +1,9 @@
-export interface MessageRateState {
+interface MessageRateState {
   rateStartedAt: number;
   rateCount: number;
 }
 
-export interface MessageRateResult {
+interface MessageRateResult {
   allowed: boolean;
   state: MessageRateState;
 }
