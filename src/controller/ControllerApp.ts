@@ -1,7 +1,9 @@
-import type { RemoteConnectionMode, RemotePath, RemotePermissions } from "../app/remote/RemoteProtocol";
-import { DEFAULT_REMOTE_PERMISSIONS } from "../app/remote/RemoteProtocol";
-import { ControllerConnection } from "./ControllerConnection";
-import { ControllerCueTracker } from "./ControllerCueTracker";
+import {
+  DEFAULT_REMOTE_PERMISSIONS,
+  type RemotePermissions,
+} from "../app/remote/RemoteProtocol.ts";
+import { ControllerConnection } from "./ControllerConnection.ts";
+import { ControllerCueTracker } from "./ControllerCueTracker.ts";
 
 type ControllerStatus = "joining" | "connecting" | "connected" | "disconnected" | "error";
 
@@ -13,7 +15,6 @@ export class ControllerApp {
   private readonly lifecycleAbort = new AbortController();
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
   private status: ControllerStatus = "joining";
-  private connectionMode: RemoteConnectionMode = "ws";
   private webRtcConnected = false;
 
   constructor(host: HTMLElement) {
@@ -22,9 +23,7 @@ export class ControllerApp {
     this.connection = new ControllerConnection({
       onStatus: (status, detail) => this.setStatus(status, detail),
       onPermissions: (permissions) => this.setPermissions(permissions),
-      onLatency: (rttMs) => this.setLatency(rttMs),
-      onWebRtcState: (connected, path) => this.setWebRtcState(connected, path),
-      onConnectionMode: (mode) => this.setConnectionMode(mode),
+      onWebRtcState: (connected) => this.setWebRtcState(connected),
     });
     this.bindControls();
   }
@@ -58,7 +57,7 @@ export class ControllerApp {
     }).join("");
     return `
       <section class="controller-shell">
-        <header><h1>Character VJ Remote</h1><div class="connection-line"><b data-status>● JOINING</b><span data-latency>— ms</span></div></header>
+        <header><h1>Character VJ Remote</h1><b data-status>● JOINING</b></header>
         <div class="cue-grid">${cueButtons}</div>
         <div class="utility-grid">
           <button data-command="tap">TAP</button>
@@ -66,8 +65,7 @@ export class ControllerApp {
           <button data-command="record">REC</button>
         </div>
         <button class="clear" data-command="clear">CLEAR</button>
-        <div class="controller-connection"><span>MODE</span><b data-mode>WS RELAY</b><b data-webrtc-status>WebRTC DISCONNECTED</b></div>
-        <div class="controller-path"><span>Transport</span><b data-transport>WebSocket</b><span>Path</span><b data-path>WS RELAY</b></div>
+        <div class="controller-path"><span>WebRTC Direct</span><b data-transport>未接続</b></div>
         <p data-detail></p>
       </section>
     `;
@@ -142,47 +140,21 @@ export class ControllerApp {
     this.applyDisabledState();
   }
 
-  private setLatency(rttMs: number): void {
-    this.required<HTMLElement>("[data-latency]").textContent = `${Math.round(rttMs)} ms`;
-  }
-
-  private setConnectionMode(mode: RemoteConnectionMode): void {
-    if (this.connectionMode !== mode) this.releaseLocalPointers();
-    this.connectionMode = mode;
-    this.required<HTMLElement>("[data-mode]").textContent = this.modeLabel(mode);
-    if (mode === "ws") {
-      this.required<HTMLElement>("[data-transport]").textContent = "WebSocket";
-      this.required<HTMLElement>("[data-path]").textContent = "WS RELAY";
-      this.required<HTMLElement>("[data-webrtc-status]").textContent = "WebRTC DISCONNECTED";
-    }
-    this.applyDisabledState();
-  }
-
-  private setWebRtcState(connected: boolean, path: RemotePath): void {
+  private setWebRtcState(connected: boolean): void {
     this.webRtcConnected = connected;
-    this.required<HTMLElement>("[data-webrtc-status]").textContent = `WebRTC ${connected ? "CONNECTED" : "DISCONNECTED"}`;
-    if (this.connectionMode !== "ws") {
-      const useWebRtc = connected;
-      this.required<HTMLElement>("[data-transport]").textContent = useWebRtc ? "WebRTC" : (this.connectionMode === "auto" ? "WebSocket" : "WebRTC");
-      this.required<HTMLElement>("[data-path]").textContent = useWebRtc ? path : (this.connectionMode === "auto" ? "WS RELAY" : path);
-    }
-    if (!connected && (this.connectionMode === "direct" || this.connectionMode === "turn")) this.releaseLocalPointers();
-    this.applyDisabledState();
+    this.required<HTMLElement>("[data-transport]").textContent = connected ? "接続済み" : "未接続";
+    if (!connected) this.releaseLocalPointers();
+    if (connected) this.setStatus("connected");
+    else this.applyDisabledState();
   }
 
   private applyDisabledState(): void {
-    const transportReady = this.connectionMode === "ws" || this.connectionMode === "auto" || this.webRtcConnected;
-    const connected = this.status === "connected" && transportReady;
+    const connected = this.status === "connected" && this.webRtcConnected;
     for (const button of this.host.querySelectorAll<HTMLButtonElement>("[data-cue]")) button.disabled = !connected || !this.permissions.cue;
     this.required<HTMLButtonElement>("[data-command=tap]").disabled = !connected || !this.permissions.tapSync;
     this.required<HTMLButtonElement>("[data-command=sync]").disabled = !connected || !this.permissions.tapSync;
     this.required<HTMLButtonElement>("[data-command=record]").disabled = !connected || !this.permissions.record;
     this.required<HTMLButtonElement>("[data-command=clear]").disabled = !connected || !this.permissions.clear;
-  }
-
-  private modeLabel(mode: RemoteConnectionMode): string {
-    if (mode === "ws") return "WS RELAY";
-    return mode.toUpperCase();
   }
 
   private required<T extends Element>(selector: string): T {

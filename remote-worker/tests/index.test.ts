@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { createSecretToken, hashToken } from "../src/auth";
+import { DEFAULT_PERMISSIONS, JOIN_TIMEOUT_MS } from "../src/protocol";
 
 /** WebSocket closeをtimeout付きで待つ */
 function waitForClose(socket: WebSocket): Promise<CloseEvent> {
@@ -51,7 +52,7 @@ describe("Worker edge security", () => {
     const response = await SELF.fetch("https://worker.test/v1/rooms", {
       method: "POST",
       headers: { Origin: "https://tsut-ps.github.io", "content-type": "application/json" },
-      body: "{}",
+      body: JSON.stringify({ permissions: DEFAULT_PERMISSIONS }),
     });
     expect(response.status).toBe(201);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
@@ -118,6 +119,42 @@ describe("Worker edge security", () => {
     expect(response.status).toBe(204);
     expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://tsut-ps.github.io");
     expect(response.headers.get("Access-Control-Allow-Origin")).not.toBe("*");
+    expect(response.headers.get("Access-Control-Allow-Headers")).toBe("content-type");
+  });
+
+  it("QR生成後のactivateから30秒だけJOINを開く", async () => {
+    const roomId = crypto.randomUUID();
+    const hostToken = createSecretToken();
+    const hostTicket = createSecretToken();
+    const stub = env.Room.getByName(roomId);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), Date.now() + 60_000, DEFAULT_PERMISSIONS);
+    const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
+    const host = response.webSocket!;
+    const ready = waitForMessage(host, (message) => message.type === "ready");
+    host.accept();
+    await ready;
+    const requestId = crypto.randomUUID();
+    const ack = waitForMessage(host, (message) => message.type === "hostAck" && message.requestId === requestId);
+    host.send(JSON.stringify({ v: 1, type: "openJoin", requestId }));
+    expect(await ack).toMatchObject({ action: "openJoin", ok: true });
+    await runInDurableObject(stub, (_instance, state) => {
+      const room = state.storage.sql.exec<{ join_open: number; join_expires_at: number | null }>(
+        "SELECT join_open, join_expires_at FROM room_state WHERE singleton = 1",
+      ).one();
+      expect(room).toEqual({ join_open: 0, join_expires_at: null });
+    });
+    const activatedAt = Date.now();
+    const opened = waitForMessage(host, (message) => message.type === "state" && message.joinOpen === true);
+    host.send(JSON.stringify({ v: 1, type: "activateJoin" }));
+    await opened;
+    await runInDurableObject(stub, (_instance, state) => {
+      const room = state.storage.sql.exec<{ join_expires_at: number }>(
+        "SELECT join_expires_at FROM room_state WHERE singleton = 1",
+      ).one();
+      expect(room.join_expires_at).toBeGreaterThanOrEqual(activatedAt + JOIN_TIMEOUT_MS);
+      expect(room.join_expires_at).toBeLessThanOrEqual(Date.now() + JOIN_TIMEOUT_MS);
+    });
+    host.close(1000, "done");
   });
 
   it("session期限で接続中WebSocketを終了する", async () => {
@@ -129,6 +166,7 @@ describe("Worker edge security", () => {
       await hashToken(hostToken),
       await hashToken(sessionTicket),
       expiresAt,
+      DEFAULT_PERMISSIONS,
     );
     const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, {
       headers: {
@@ -154,6 +192,7 @@ describe("Worker edge security", () => {
       await hashToken(hostToken),
       await hashToken(sessionTicket),
       Date.now() + 60_000,
+      DEFAULT_PERMISSIONS,
     );
     const headers = {
       Origin: "https://tsut-ps.github.io",
@@ -171,7 +210,7 @@ describe("Worker edge security", () => {
     second.close(1000, "done");
   });
 
-  it("操作中seqをattachmentへ保持して切断時だけSQLiteへ保存する", async () => {
+  it("Controller command本文を拒否し切断状態だけ永続化する", async () => {
     const roomId = crypto.randomUUID();
     const hostToken = createSecretToken();
     const hostTicket = createSecretToken();
@@ -179,12 +218,13 @@ describe("Worker edge security", () => {
     const controllerSessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 5 * 60_000;
     const stub = env.Room.getByName(roomId);
-    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt, DEFAULT_PERMISSIONS);
     const joinSecret = createSecretToken();
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
-        "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+        "UPDATE room_state SET join_open = 1, join_secret_hash = ?, join_expires_at = ? WHERE singleton = 1",
         await hashToken(joinSecret),
+        Date.now() + 30_000,
       );
     });
     expect((await stub.joinWithSecret(
@@ -193,14 +233,6 @@ describe("Worker edge security", () => {
       controllerSessionId,
       expiresAt,
     )).ok).toBe(true);
-    await runInDurableObject(stub, (_instance, state) => {
-      const pending = state.storage.sql.exec<{ expires_at: number }>(
-        "SELECT expires_at FROM tickets WHERE controller_session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(pending.expires_at).toBeLessThan(expiresAt);
-    });
-
     const hostResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
     const host = hostResponse.webSocket!;
     const hostReady = waitForMessage(host, (message) => message.type === "ready");
@@ -212,63 +244,12 @@ describe("Worker edge security", () => {
     const controllerReady = waitForMessage(controller, (message) => message.type === "ready");
     controller.accept();
     await controllerReady;
-    await runInDurableObject(stub, (_instance, state) => {
-      const active = state.storage.sql.exec<{ expires_at: number }>(
-        "SELECT expires_at FROM tickets WHERE controller_session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(active.expires_at).toBe(expiresAt);
-    });
-
-    const firstRemote = waitForMessage(host, (message) => message.type === "remote");
+    const rejected = waitForMessage(controller, (message) => message.type === "error");
     controller.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "down" } }));
-    await firstRemote;
-    await runInDurableObject(stub, (_instance, state) => {
-      const row = state.storage.sql.exec<{ last_seq: number }>(
-        "SELECT last_seq FROM controllers WHERE session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(row.last_seq).toBe(-1);
-    });
-
-    const controllerReplaced = waitForClose(controller);
-    const replacementResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
-    const replacement = replacementResponse.webSocket!;
-    const replacementReady = waitForMessage(replacement, (message) => message.type === "ready");
-    replacement.accept();
-    await replacementReady;
-    expect((await controllerReplaced).code).toBe(4002);
-
+    expect(await rejected).toMatchObject({ code: "forbidden_message" });
     const disconnected = waitForMessage(host, (message) => message.type === "controllerDisconnected");
-    replacement.close(1000, "checkpoint");
+    controller.close(1000, "done");
     await disconnected;
-    await runInDurableObject(stub, (_instance, state) => {
-      const row = state.storage.sql.exec<{ last_seq: number; current_connection_id: string | null }>(
-        "SELECT last_seq, current_connection_id FROM controllers WHERE session_id = ?",
-        controllerSessionId,
-      ).one();
-      expect(row).toEqual({ last_seq: 1, current_connection_id: null });
-    });
-
-    const reconnectResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
-    const reconnect = reconnectResponse.webSocket!;
-    const reconnectReady = waitForMessage(reconnect, (message) => message.type === "ready");
-    reconnect.accept();
-    await reconnectReady;
-    const forwardedSeq: number[] = [];
-    host.addEventListener("message", (event) => {
-      const message = JSON.parse(String(event.data)) as { type?: string; envelope?: { seq?: number } };
-      if (message.type === "remote" && typeof message.envelope?.seq === "number") forwardedSeq.push(message.envelope.seq);
-    });
-    const nextRemote = waitForMessage(host, (message) => {
-      const envelope = message.envelope as Record<string, unknown> | undefined;
-      return message.type === "remote" && envelope?.seq === 2;
-    });
-    reconnect.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "up" } }));
-    reconnect.send(JSON.stringify({ v: 1, seq: 2, command: { type: "cue", cue: 1, state: "up" } }));
-    await nextRemote;
-    expect(forwardedSeq).toEqual([2]);
-    reconnect.close(1000, "done");
     host.close(1000, "done");
   });
 
@@ -280,12 +261,13 @@ describe("Worker edge security", () => {
     const controllerSessionId = crypto.randomUUID();
     const expiresAt = Date.now() + 60_000;
     const stub = env.Room.getByName(roomId);
-    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt, DEFAULT_PERMISSIONS);
     const joinSecret = createSecretToken();
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
-        "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+        "UPDATE room_state SET join_open = 1, join_secret_hash = ?, join_expires_at = ? WHERE singleton = 1",
         await hashToken(joinSecret),
+        Date.now() + 30_000,
       );
     });
     expect((await stub.joinWithSecret(
@@ -347,6 +329,7 @@ describe("Worker edge security", () => {
       await hashToken(hostToken),
       await hashToken(hostTicket),
       Date.now() + 60_000,
+      DEFAULT_PERMISSIONS,
     );
     const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
     const host = response.webSocket!;

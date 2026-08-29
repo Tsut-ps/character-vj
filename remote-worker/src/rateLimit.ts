@@ -1,15 +1,15 @@
-export interface CommandRateState {
+interface MessageRateState {
   rateStartedAt: number;
   rateCount: number;
 }
 
-export interface CommandRateResult {
+interface MessageRateResult {
   allowed: boolean;
-  state: CommandRateState;
+  state: MessageRateState;
 }
 
 /** 常駐timerを使わず指定時間窓のmessage数を制限する */
-export function checkCommandRate(state: CommandRateState, now: number, limit = 60, windowMs = 1000): CommandRateResult {
+export function checkMessageRate(state: MessageRateState, now: number, limit = 60, windowMs = 1000): MessageRateResult {
   const current = now - state.rateStartedAt >= windowMs
     ? { rateStartedAt: now, rateCount: 0 }
     : state;

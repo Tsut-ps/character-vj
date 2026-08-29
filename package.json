@@ -6,12 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --experimental-strip-types --test tests/BeatClock.test.ts tests/CueRecorder.test.ts tests/latchedMotion.test.ts tests/gravityMotion.test.ts tests/mediaFileKind.test.ts tests/RemoteInputAdapter.test.ts tests/RemoteProtocol.test.ts tests/ControllerRemote.test.ts tests/RemoteManager.test.ts",
+    "test": "node --experimental-strip-types --test tests/BeatClock.test.ts tests/CueRecorder.test.ts tests/latchedMotion.test.ts tests/gravityMotion.test.ts tests/mediaFileKind.test.ts tests/RemoteInputAdapter.test.ts tests/RemoteProtocol.test.ts tests/ControllerRemote.test.ts tests/WebRtcRemote.test.ts tests/RemoteManager.test.ts",
     "typecheck:test": "tsc -p tests/tsconfig.json",
     "preview": "vite preview"
   },
   "dependencies": {
-    "partysocket": "^1.3.0",
     "pixi.js": "8.19.0",
     "qrcode": "^1.5.4",
     "zod": "^4.4.3"

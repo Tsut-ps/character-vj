@@ -70,15 +70,13 @@ test("permission違反とcue範囲外をHost側でも拒否する", () => {
   assert.equal(actions.length, 0);
 });
 
-test("500 controllerのstate messageを受信できる", () => {
+test("20 controllerのstate messageを受信できる", () => {
   const controllerSessionId = crypto.randomUUID();
   const message = JSON.stringify({
     v: 1,
     type: "state",
     joinOpen: false,
-    permissions: { cue: true, tapSync: false, record: false, clear: false },
-    connectionMode: "auto",
-    controllers: Array.from({ length: 500 }, () => ({ controllerSessionId })),
+    controllers: Array.from({ length: 20 }, () => ({ controllerSessionId })),
   });
   assert.equal(parseServerMessage(message)?.type, "state");
 });

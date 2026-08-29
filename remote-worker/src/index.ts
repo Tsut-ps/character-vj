@@ -2,8 +2,7 @@ import { Hono, type Context, type Next } from "hono";
 import { partyserverMiddleware } from "hono-party";
 import { createSecretToken, hashToken } from "./auth";
 import { Room } from "./Room";
-import { hostTicketRequestSchema, joinRequestSchema, roomIdSchema, SESSION_TICKET_TTL_MS } from "./protocol";
-import { generateTurnIceServers } from "./turn";
+import { createRoomRequestSchema, hostTicketRequestSchema, joinRequestSchema, roomIdSchema, SESSION_TICKET_TTL_MS } from "./protocol";
 
 type AppEnv = { Bindings: Env };
 
@@ -31,7 +30,7 @@ async function corsGuard(c: Context<AppEnv>, next: Next): Promise<Response | voi
       headers: {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "content-type, authorization",
+        "Access-Control-Allow-Headers": "content-type",
         "Access-Control-Max-Age": "600",
         "Vary": "Origin",
       },
@@ -72,14 +71,6 @@ function sessionTicketFromRequest(request: Request): string | null {
   if (matches.length !== 1) return null;
   const ticket = matches[0].slice(TICKET_PROTOCOL_PREFIX.length);
   return /^[A-Za-z0-9_-]{32,256}$/u.test(ticket) ? ticket : null;
-}
-
-/** Authorization BearerからHTTP API用session ticketを取得する */
-function bearerSessionTicket(request: Request): string | null {
-  const header = request.headers.get("Authorization");
-  if (!header || header.length > 384) return null;
-  const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/u.exec(header);
-  return match?.[1] ?? null;
 }
 
 /** 小さいJSON bodyだけをparseしてmemory abuseを防ぐ */
@@ -131,13 +122,15 @@ app.post("/v1/rooms", async (c) => {
   if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "origin_forbidden" }, 403);
   const rate = await c.env.ROOM_CREATE_RATE_LIMITER.limit({ key: `create:${requestIp(c.req.raw)}` });
   if (!rate.success) return c.json({ error: "rate_limited" }, 429);
+  const body = createRoomRequestSchema.safeParse(await readSmallJson(c.req.raw));
+  if (!body.success) return c.json({ error: "invalid_request" }, 400);
 
   const roomId = crypto.randomUUID();
   const hostToken = createSecretToken();
   const sessionTicket = createSecretToken();
   const expiresAt = Date.now() + SESSION_TICKET_TTL_MS;
   const stub = c.env.Room.getByName(roomId);
-  const initialized = await stub.initializeRoom(await hashToken(hostToken), await hashToken(sessionTicket), expiresAt);
+  const initialized = await stub.initializeRoom(await hashToken(hostToken), await hashToken(sessionTicket), expiresAt, body.data.permissions);
   if (!initialized) return c.json({ error: "room_collision" }, 409);
   return c.json({ v: 1, roomId, hostToken, sessionTicket, expiresAt }, 201);
 });
@@ -200,26 +193,6 @@ app.post("/v1/rooms/:roomId/join", async (c) => {
   });
 });
 
-/** 認証済みsessionだけに短期Cloudflare TURN ICE credentialsを発行する */
-app.post("/v1/rooms/:roomId/ice-servers", async (c) => {
-  if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "origin_forbidden" }, 403);
-  const roomId = c.req.param("roomId");
-  if (!roomIdSchema.safeParse(roomId).success) return c.json({ error: "invalid_room" }, 400);
-  const ticket = bearerSessionTicket(c.req.raw);
-  if (!ticket) return c.json({ error: "missing_session_ticket" }, 401);
-  const authorization = await c.env.Room.getByName(roomId).authorizeWebSocket(ticket);
-  if (!authorization.ok) return c.json({ error: "forbidden" }, 403);
-  const rate = await c.env.WS_RATE_LIMITER.limit({ key: `turn-credential-room:${roomId}` });
-  if (!rate.success) return c.json({ error: "rate_limited" }, 429);
-  try {
-    const iceServers = await generateTurnIceServers(c.env, 3600);
-    return c.json({ v: 1, iceServers });
-  } catch (error) {
-    console.error(JSON.stringify({ event: "turn_credential_error", message: error instanceof Error ? error.message : "unknown" }));
-    return c.json({ error: "turn_unavailable" }, 503);
-  }
-});
-
 /** OriginとticketをUpgrade前に検証してserver-side identityへ置換する */
 app.use("*", partyserverMiddleware<AppEnv>({
   options: {
@@ -234,7 +207,7 @@ app.use("*", partyserverMiddleware<AppEnv>({
       ]);
       if (!actorRate.success || !roomRate.success) return new Response("Rate limited", { status: 429 });
       const authorization = await c.env.Room.getByName(lobby.name).authorizeWebSocket(ticket);
-      if (!authorization.ok || !authorization.role || !authorization.permissions || !authorization.expiresAt) {
+      if (!authorization.ok || !authorization.role || !authorization.expiresAt) {
         return new Response("Invalid session ticket", { status: 401 });
       }
 

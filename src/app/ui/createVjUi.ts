@@ -13,19 +13,17 @@ export interface RemoteHostElements {
   join: HTMLElement;
   startButton: HTMLButtonElement;
   showQrButton: HTMLButtonElement;
-  autoButton: HTMLButtonElement;
-  wsButton: HTMLButtonElement;
-  directButton: HTMLButtonElement;
-  turnButton: HTMLButtonElement;
-  webRtcStatus: HTMLElement;
+  sessionActions: HTMLElement;
   transport: HTMLElement;
-  path: HTMLElement;
+  permissionSummary: HTMLElement;
   permissionInputs: Record<"cue" | "tapSync" | "record" | "clear", HTMLInputElement>;
   stats: HTMLElement;
   qrOverlay: HTMLElement;
   qrImage: HTMLImageElement;
   qrRoom: HTMLElement;
   qrStatus: HTMLElement;
+  qrProgress: HTMLProgressElement;
+  qrCountdown: HTMLElement;
   closeQrButton: HTMLButtonElement;
 }
 
@@ -151,13 +149,9 @@ export function createVjUi(host: HTMLElement): VjUiElements {
       join: queryRequired<HTMLElement>(panel, "[data-remote-join]"),
       startButton: queryRequired<HTMLButtonElement>(panel, "[data-action=start-remote]"),
       showQrButton: queryRequired<HTMLButtonElement>(panel, "[data-action=show-qr]"),
-      autoButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=auto]"),
-      wsButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=ws]"),
-      directButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=direct]"),
-      turnButton: queryRequired<HTMLButtonElement>(panel, "[data-remote-connection=turn]"),
-      webRtcStatus: queryRequired<HTMLElement>(panel, "[data-remote-webrtc-status]"),
+      sessionActions: queryRequired<HTMLElement>(panel, "[data-remote-session-actions]"),
       transport: queryRequired<HTMLElement>(panel, "[data-remote-transport]"),
-      path: queryRequired<HTMLElement>(panel, "[data-remote-path]"),
+      permissionSummary: queryRequired<HTMLElement>(panel, "[data-remote-permission-summary]"),
       permissionInputs: {
         cue: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=cue]"),
         tapSync: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=tapSync]"),
@@ -169,6 +163,8 @@ export function createVjUi(host: HTMLElement): VjUiElements {
       qrImage: queryRequired<HTMLImageElement>(remoteQrOverlay, "[data-remote-qr]"),
       qrRoom: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-room]"),
       qrStatus: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-qr-status]"),
+      qrProgress: queryRequired<HTMLProgressElement>(remoteQrOverlay, "[data-remote-qr-progress]"),
+      qrCountdown: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-qr-countdown]"),
       closeQrButton: queryRequired<HTMLButtonElement>(remoteQrOverlay, "[data-action=close-remote-qr]"),
     },
   };

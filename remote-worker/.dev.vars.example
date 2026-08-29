@@ -1,3 +1,0 @@
-# Cloudflare Realtime TURN key (server-side only)
-TURN_KEY_ID=replace-with-turn-key-id
-TURN_KEY_API_TOKEN=replace-with-turn-key-api-token

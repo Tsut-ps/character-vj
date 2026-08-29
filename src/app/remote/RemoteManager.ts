@@ -1,17 +1,15 @@
 import QRCode from "qrcode";
-import type { RemoteHostElements } from "../ui/createVjUi";
+import type { RemoteHostElements } from "../ui/createVjUi.ts";
 import { RemoteInputAdapter } from "./RemoteInputAdapter.ts";
 import {
   createRoomResponseSchema,
   DEFAULT_REMOTE_PERMISSIONS,
   hostTicketResponseSchema,
-  iceServersResponseSchema,
   parseServerMessage,
+  REMOTE_CONTROLLER_LIMIT,
+  REMOTE_JOIN_TIMEOUT_MS,
   remoteSessionTimeoutMs,
   type HostClientMessage,
-  type RemoteConnectionMode,
-  type RemoteIceServers,
-  type RemotePath,
   type RemotePermissions,
   type ServerMessage,
 } from "./RemoteProtocol.ts";
@@ -38,12 +36,12 @@ interface ReadyWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
+  transport?: RemoteTransport;
 }
 
-interface ControllerWebRtcState {
-  connected: boolean;
-  path: RemotePath;
-}
+const HOST_RECONNECT_MIN_DELAY_MS = 600;
+const HOST_RECONNECT_MAX_DELAY_MS = 5_000;
+const HOST_READY_TIMEOUT_MS = 5_000;
 
 export interface RemoteManagerDependencies {
   baseUrl?: string;
@@ -52,6 +50,7 @@ export interface RemoteManagerDependencies {
   createQr?: (value: string) => Promise<string>;
   controllerUrl?: () => URL;
   webRtcFactory?: WebRtcHostFactory;
+  qrTimeoutMs?: number;
 }
 
 /** Host remote session、QR、permissions、transport、RTTを管理する */
@@ -65,15 +64,13 @@ export class RemoteManager {
   private readonly createQr: (value: string) => Promise<string>;
   private readonly controllerUrl: () => URL;
   private readonly webRtc: RemoteWebRtcHost;
+  private readonly qrTimeoutMs: number;
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
-  private connectionMode: RemoteConnectionMode = "auto";
   private session: {
     roomId: string;
     hostToken: string;
     expiresAt: number;
   } | null = null;
-  private sessionTicket: string | null = null;
-  private cachedIceServers: RemoteIceServers | null = null;
   private transport: RemoteTransport | null = null;
   private ready = false;
   private joinOpen = false;
@@ -81,20 +78,15 @@ export class RemoteManager {
   private destroyed = false;
   private readonly controllers = new Set<string>();
   private readonly rttByController = new Map<string, number>();
-  private readonly webRtcByController = new Map<
-    string,
-    ControllerWebRtcState
-  >();
-  private readonly pendingPings = new Map<
-    string,
-    { controllerSessionId: string; sentAt: number }
-  >();
+  private readonly webRtcByController = new Map<string, boolean>();
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
-  private rtcConfigGeneration = 0;
+  private qrGaugeTimer: ReturnType<typeof setInterval> | null = null;
+  private qrExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  private lifecycleGeneration = 0;
+  private qrGeneration = 0;
 
   constructor(
     ui: RemoteHostElements,
@@ -130,25 +122,27 @@ export class RemoteManager {
           `${import.meta.env.BASE_URL}controller.html`,
           window.location.origin,
         ));
+    this.qrTimeoutMs = Math.min(
+      Math.max(1, dependencies.qrTimeoutMs ?? REMOTE_JOIN_TIMEOUT_MS),
+      REMOTE_JOIN_TIMEOUT_MS,
+    );
     const webRtcEvents: WebRtcHostEvents = {
-      sendSignal: (message) => this.transport?.sendReliable(message) ?? false,
-      onEnvelope: (controllerSessionId, envelope) => {
-        if (this.connectionMode !== "ws")
-          this.adapter.handle(controllerSessionId, envelope);
-      },
-      onState: (controllerSessionId, connected, path) =>
-        this.handleWebRtcState(controllerSessionId, connected, path),
+      sendSignal: (message) => this.transport?.send(message) ?? false,
+      onEnvelope: (controllerSessionId, envelope) => this.adapter.handle(controllerSessionId, envelope),
+      onState: (controllerSessionId, connected) =>
+        this.handleWebRtcState(controllerSessionId, connected),
       onLatency: (controllerSessionId, rttMs) =>
-        this.handleWebRtcLatency(controllerSessionId, rttMs),
+        this.setLatency(controllerSessionId, rttMs),
     };
     this.webRtc =
       dependencies.webRtcFactory?.(webRtcEvents) ??
       new WebRtcHost(webRtcEvents);
     this.adapter.setPermissions(this.permissions);
+    this.syncPermissionInputs();
 
     this.ui.startButton.addEventListener(
       "click",
-      () => void this.startRemote(),
+      () => this.toggleRemote(),
       { signal },
     );
     this.ui.showQrButton.addEventListener("click", () => void this.showQr(), {
@@ -157,37 +151,19 @@ export class RemoteManager {
     this.ui.closeQrButton.addEventListener("click", () => void this.closeQr(), {
       signal,
     });
-    this.ui.autoButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("auto"),
-      { signal },
-    );
-    this.ui.directButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("direct"),
-      { signal },
-    );
-    this.ui.turnButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("turn"),
-      { signal },
-    );
-    this.ui.wsButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("ws"),
-      { signal },
-    );
     for (const input of Object.values(this.ui.permissionInputs)) {
       input.addEventListener(
         "change",
-        () => void this.updatePermissionsFromUi(),
+        () => this.updatePermissionsFromUi(),
         { signal },
       );
     }
-    this.updateModeUi();
+    this.renderConnectionSummary();
+    this.renderControllerState();
+    this.renderRemoteToggle(false);
+    this.renderStatus("OFFLINE");
     if (!this.baseUrl) {
-      this.ui.status.textContent = "NOT CONFIGURED";
-      this.ui.startButton.disabled = true;
+      this.renderStatus("NOT CONFIGURED");
       this.ui.showQrButton.disabled = true;
       this.ui.startButton.title = "Set VITE_REMOTE_BASE_URL at build time";
     } else {
@@ -198,18 +174,21 @@ export class RemoteManager {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.lifecycleGeneration += 1;
+    this.qrGeneration += 1;
     if (this.ready && this.joinOpen)
-      this.transport?.sendReliable({
+      this.transport?.send({
         v: 1,
         type: "closeJoin",
         requestId: crypto.randomUUID(),
       });
-    if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    this.ready = false;
+    this.joinOpen = false;
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
-    this.pingTimer = null;
     this.expiryTimer = null;
     this.adapter.resetSession();
     this.webRtc.destroy();
+    this.hideQrView();
     const transport = this.transport;
     this.transport = null;
     transport?.close();
@@ -217,30 +196,60 @@ export class RemoteManager {
     this.rejectReadyWaiters("Remote manager destroyed");
   }
 
+  /** Remote sessionのONとOFFを現在状態から切り替える */
+  private toggleRemote(): void {
+    if (this.session || this.transport || this.reconnecting) {
+      this.stopRemote();
+      return;
+    }
+    void this.startRemote();
+  }
+
+  /** JOINを閉じてRemote sessionを手動終了する */
+  private stopRemote(): void {
+    if (this.ready && this.joinOpen) {
+      this.transport?.send({
+        v: 1,
+        type: "closeJoin",
+        requestId: crypto.randomUUID(),
+      });
+    }
+    this.endSession("OFFLINE");
+    this.log("REMOTE OFFLINE");
+  }
+
   private async startRemote(): Promise<void> {
     if (this.destroyed || !this.baseUrl || this.session || this.transport)
       return;
-    this.ui.startButton.disabled = true;
-    this.ui.status.textContent = "STARTING";
+    const generation = ++this.lifecycleGeneration;
+    this.renderRemoteToggle(false, true);
+    this.setPermissionInputsDisabled(true);
+    this.renderStatus("STARTING");
     try {
-      await this.ensureSession();
+      await this.ensureSession(generation);
+      if (!this.isCurrentLifecycle(generation)) return;
       await this.waitUntilReady();
-      this.ui.status.textContent = "ONLINE";
+      if (!this.isCurrentLifecycle(generation)) return;
+      this.renderStatus("ONLINE");
       this.ui.showQrButton.disabled = false;
       this.log("REMOTE ONLINE");
     } catch (error) {
+      if (!this.isCurrentLifecycle(generation)) return;
       const message =
         error instanceof Error ? error.message : "Remote start failed";
       this.endSession("ERROR");
       this.log(`REMOTE ERROR / ${message}`);
     } finally {
-      this.ui.startButton.disabled = Boolean(this.session) || !this.baseUrl;
+      if (this.isCurrentLifecycle(generation))
+        this.renderRemoteToggle(Boolean(this.session));
     }
   }
 
   private async showQr(): Promise<void> {
     if (this.destroyed || !this.ready || !this.session || this.joinVisible)
       return;
+    const session = this.session;
+    const generation = ++this.qrGeneration;
     this.ui.showQrButton.disabled = true;
     try {
       const ack = await this.request({
@@ -248,25 +257,31 @@ export class RemoteManager {
         type: "openJoin",
         requestId: crypto.randomUUID(),
       });
-      if (!ack.ok || !ack.joinSecret || !this.session)
+      if (!this.isCurrentQr(generation, session)) return;
+      if (!ack.ok || !ack.joinSecret)
         throw new Error(ack.error ?? "OPEN JOIN failed");
-      this.joinOpen = true;
-      this.ui.join.textContent = "OPEN";
       const controllerUrl = this.controllerUrl();
       controllerUrl.hash = new URLSearchParams({
-        room: this.session.roomId,
+        room: session.roomId,
         join: ack.joinSecret,
       }).toString();
       const qrDataUrl = await this.createQr(controllerUrl.toString());
-      if (this.destroyed) return;
+      if (!this.isCurrentQr(generation, session)) return;
+      if (!this.transport?.send({ v: 1, type: "activateJoin" }))
+        throw new Error("Remote socket is not open");
+      this.joinOpen = true;
+      this.ui.join.textContent = "OPEN";
       this.ui.qrImage.src = qrDataUrl;
-      this.ui.qrRoom.textContent = `ROOM ${this.session.roomId}`;
+      this.ui.qrRoom.textContent = `ROOM ${session.roomId}`;
       this.ui.qrStatus.textContent = "JOIN OPEN";
       this.ui.qrOverlay.hidden = false;
       this.joinVisible = true;
-      this.ui.showQrButton.textContent = "QR SHOWN";
+      this.startQrExpiry(session);
+      this.ui.showQrButton.textContent = "QR表示中";
+      this.renderStatus("ONLINE");
       this.log("REMOTE JOIN OPEN");
     } catch (error) {
+      if (!this.isCurrentQr(generation, session)) return;
       if (this.joinOpen && this.ready) {
         try {
           await this.request({
@@ -275,22 +290,27 @@ export class RemoteManager {
             requestId: crypto.randomUUID(),
           });
         } catch {
-          /* server closes join on host loss */
+          /* Host切断時はserver側でもJOINを閉じる */
         }
       }
       this.joinOpen = false;
       this.ui.join.textContent = "CLOSED";
       this.hideQrView();
+      this.renderStatus("ERROR");
       this.log(
         `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote connection failed"}`,
       );
     } finally {
-      this.ui.showQrButton.disabled = this.joinVisible || !this.ready;
+      if (this.isCurrentQr(generation, session))
+        this.ui.showQrButton.disabled = this.joinVisible || !this.ready;
     }
   }
 
   private async closeQr(): Promise<void> {
     if (!this.joinVisible || !this.ready) return;
+    const session = this.session;
+    if (!session) return;
+    const generation = ++this.qrGeneration;
     this.ui.closeQrButton.disabled = true;
     this.ui.qrStatus.textContent = "CLOSING JOIN…";
     try {
@@ -299,57 +319,59 @@ export class RemoteManager {
         type: "closeJoin",
         requestId: crypto.randomUUID(),
       });
+      if (!this.isCurrentQr(generation, session)) return;
       if (!ack.ok) throw new Error(ack.error ?? "CLOSE JOIN failed");
       this.joinOpen = false;
       this.ui.join.textContent = "CLOSED";
       this.hideQrView();
-      this.ui.status.textContent = "ONLINE";
+      this.renderStatus("ONLINE");
       this.log("REMOTE JOIN CLOSED");
     } catch (error) {
+      if (!this.isCurrentQr(generation, session)) return;
+      this.renderStatus("ERROR");
       this.ui.qrStatus.textContent =
         error instanceof Error ? error.message : "CLOSE FAILED";
     } finally {
-      this.ui.closeQrButton.disabled = false;
+      if (this.isCurrentQr(generation, session))
+        this.ui.closeQrButton.disabled = false;
     }
   }
 
-  private async ensureSession(): Promise<void> {
+  private async ensureSession(generation: number): Promise<void> {
     if (this.transport) return;
     const response = await this.fetchImpl(
       new URL("v1/rooms", this.withTrailingSlash(this.baseUrl)),
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: "{}",
+        body: JSON.stringify({ permissions: this.permissions }),
       },
     );
     if (!response.ok)
       throw new Error(`Room create failed (${response.status})`);
     const parsed = createRoomResponseSchema.safeParse(await response.json());
     if (!parsed.success) throw new Error("Invalid room create response");
+    if (!this.isCurrentLifecycle(generation)) return;
     this.session = {
       roomId: parsed.data.roomId,
       hostToken: parsed.data.hostToken,
       expiresAt: parsed.data.expiresAt,
     };
-    this.sessionTicket = parsed.data.sessionTicket;
     this.connect(parsed.data.sessionTicket);
     this.scheduleExpiry(parsed.data.expiresAt);
   }
 
-  private connect(sessionTicket: string): void {
+  private connect(sessionTicket: string): RemoteTransport {
     if (!this.session) throw new Error("Missing room id");
-    this.sessionTicket = sessionTicket;
     let transport: RemoteTransport;
     transport = this.transportFactory({
       baseUrl: this.baseUrl,
       roomId: this.session.roomId,
       sessionTicket,
-      autoReconnect: false,
       events: {
         onOpen: () => {
           if (this.transport === transport)
-            this.ui.status.textContent = "AUTHENTICATING";
+            this.renderStatus("AUTHENTICATING");
         },
         onClose: (event) => {
           if (this.transport === transport) this.handleClose(event);
@@ -359,15 +381,17 @@ export class RemoteManager {
         },
         onError: () => {
           if (!this.destroyed && this.transport === transport)
-            this.ui.status.textContent = "RECONNECTING";
+            this.renderStatus("RECONNECTING");
         },
       },
     });
     this.transport = transport;
+    return transport;
   }
 
   private handleClose(event: CloseEvent): void {
     if (this.destroyed || !this.transport || !this.session) return;
+    const closedTransport = this.transport;
     if (
       event.code === 4001 ||
       event.code === 4003 ||
@@ -384,16 +408,11 @@ export class RemoteManager {
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
     this.adapter.releaseAllControllers();
-    this.webRtc.setMode("ws", []);
-    this.controllers.clear();
-    this.rttByController.clear();
-    this.webRtcByController.clear();
-    this.pendingPings.clear();
-    this.renderConnectionSummary();
-    this.renderControllerState();
+    this.clearControllerConnections();
     this.rejectPending("Remote connection closed");
+    this.rejectReadyWaiters("Remote connection closed", closedTransport);
     this.hideQrView();
-    this.ui.status.textContent = "RECONNECTING";
+    this.renderStatus("RECONNECTING");
     this.ui.showQrButton.disabled = true;
     void this.reconnectHost();
   }
@@ -402,34 +421,46 @@ export class RemoteManager {
     if (this.reconnecting || this.destroyed || !this.session) return;
     this.reconnecting = true;
     const session = this.session;
+    let delayMs = 0;
     try {
-      const response = await this.fetchImpl(
-        new URL(
-          `v1/rooms/${encodeURIComponent(session.roomId)}/host-ticket`,
-          this.withTrailingSlash(this.baseUrl),
-        ),
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ hostToken: session.hostToken }),
-        },
-      );
-      if (!response.ok)
-        throw new Error(`Host reconnect failed (${response.status})`);
-      const parsed = hostTicketResponseSchema.safeParse(await response.json());
-      if (
-        !parsed.success ||
-        parsed.data.roomId !== session.roomId ||
-        this.session !== session
-      )
-        throw new Error("Invalid host ticket response");
-      this.connect(parsed.data.sessionTicket);
-    } catch (error) {
-      if (this.session === session) {
-        this.log(
-          `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote reconnect error"}`,
-        );
-        this.endSession("DISCONNECTED");
+      while (!this.destroyed && this.session === session) {
+        if (delayMs > 0) await this.waitForReconnect(delayMs);
+        if (this.destroyed || this.session !== session) return;
+        try {
+          const response = await this.fetchImpl(
+            new URL(
+              `v1/rooms/${encodeURIComponent(session.roomId)}/host-ticket`,
+              this.withTrailingSlash(this.baseUrl),
+            ),
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ hostToken: session.hostToken }),
+            },
+          );
+          if (response.status === 403 || response.status === 404) {
+            this.endSession("SESSION EXPIRED");
+            return;
+          }
+          if (!response.ok)
+            throw new Error(`Host reconnect failed (${response.status})`);
+          const parsed = hostTicketResponseSchema.safeParse(await response.json());
+          if (!parsed.success || parsed.data.roomId !== session.roomId)
+            throw new Error("Invalid host ticket response");
+          if (this.session !== session) return;
+          const transport = this.connect(parsed.data.sessionTicket);
+          await this.waitUntilReady(HOST_READY_TIMEOUT_MS, transport);
+          return;
+        } catch (error) {
+          if (this.destroyed || this.session !== session) return;
+          this.closeCurrentTransport();
+          this.log(
+            `REMOTE RECONNECT / ${error instanceof Error ? error.message : "Retrying"}`,
+          );
+          delayMs = delayMs === 0
+            ? HOST_RECONNECT_MIN_DELAY_MS
+            : Math.min(delayMs * 2, HOST_RECONNECT_MAX_DELAY_MS);
+        }
       }
     } finally {
       this.reconnecting = false;
@@ -447,33 +478,26 @@ export class RemoteManager {
   }
 
   private endSession(status: string): void {
+    this.lifecycleGeneration += 1;
+    this.qrGeneration += 1;
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
-    if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.expiryTimer = null;
-    this.pingTimer = null;
     this.ready = false;
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
     this.adapter.resetSession();
-    this.webRtc.setMode("ws", []);
-    this.controllers.clear();
-    this.rttByController.clear();
-    this.webRtcByController.clear();
-    this.pendingPings.clear();
-    this.renderConnectionSummary();
-    this.renderControllerState();
+    this.clearControllerConnections();
     this.rejectPending("Remote session ended");
     this.rejectReadyWaiters("Remote session ended");
     this.hideQrView();
     const transport = this.transport;
     this.transport = null;
     this.session = null;
-    this.sessionTicket = null;
-    this.cachedIceServers = null;
     transport?.close();
-    this.ui.status.textContent = status;
-    this.ui.startButton.disabled = !this.baseUrl;
+    this.renderStatus(status);
+    this.renderRemoteToggle(false);
     this.ui.showQrButton.disabled = true;
+    this.setPermissionInputsDisabled(false);
   }
 
   private handleMessage(data: unknown): void {
@@ -483,24 +507,16 @@ export class RemoteManager {
       case "ready":
         if (message.role !== "host") return;
         this.ready = true;
-        this.permissions = message.permissions;
-        this.adapter.setPermissions(message.permissions);
-        this.syncPermissionInputs();
-        this.ui.status.textContent = "ONLINE";
-        this.ui.startButton.disabled = true;
+        this.renderStatus("ONLINE");
+        this.renderRemoteToggle(true);
         this.ui.showQrButton.disabled = false;
         this.ui.closeQrButton.disabled = false;
         for (const waiter of this.readyWaiters) {
+          if (waiter.transport && waiter.transport !== this.transport) continue;
           if (waiter.timer !== null) clearTimeout(waiter.timer);
           waiter.resolve();
+          this.readyWaiters.delete(waiter);
         }
-        this.readyWaiters.clear();
-        this.startPings();
-        this.transport?.sendReliable({
-          v: 1,
-          type: "requestState",
-          requestId: crypto.randomUUID(),
-        });
         return;
       case "hostAck": {
         const pending = this.pendingRequests.get(message.requestId);
@@ -513,10 +529,6 @@ export class RemoteManager {
       case "state": {
         this.joinOpen = message.joinOpen;
         this.ui.join.textContent = message.joinOpen ? "OPEN" : "CLOSED";
-        this.permissions = message.permissions;
-        this.adapter.setPermissions(message.permissions);
-        this.syncPermissionInputs();
-
         const nextControllers = new Set(
           message.controllers.map(
             (controller) => controller.controllerSessionId,
@@ -528,13 +540,6 @@ export class RemoteManager {
             this.adapter.releaseController(controllerSessionId);
             this.rttByController.delete(controllerSessionId);
             this.webRtcByController.delete(controllerSessionId);
-            this.webRtc.controllerDisconnected(controllerSessionId);
-
-            for (const [nonce, ping] of this.pendingPings) {
-              if (ping.controllerSessionId === controllerSessionId) {
-                this.pendingPings.delete(nonce);
-              }
-            }
           }
         }
 
@@ -543,19 +548,17 @@ export class RemoteManager {
           this.controllers.add(controllerSessionId);
         }
 
-        void this.applyConnectionMode(message.connectionMode);
+        this.webRtc.syncControllers(this.controllers);
         this.renderConnectionSummary();
 
         if (!message.joinOpen) this.hideQrView();
         this.renderControllerState();
         return;
       }
-      case "connectionMode":
-        void this.applyConnectionMode(message.mode);
-        return;
       case "controllerConnected":
         this.controllers.add(message.controllerSessionId);
         this.webRtc.controllerConnected(message.controllerSessionId);
+        this.renderConnectionSummary();
         this.renderControllerState();
         return;
       case "controllerDisconnected":
@@ -567,28 +570,14 @@ export class RemoteManager {
         this.renderConnectionSummary();
         this.renderControllerState();
         return;
-      case "remote": {
-        const rtcConnected =
-          this.webRtcByController.get(message.controllerSessionId)
-            ?.connected === true;
-        if (
-          this.connectionMode === "ws" ||
-          (this.connectionMode === "auto" && !rtcConnected)
-        ) {
-          this.adapter.handle(message.controllerSessionId, message.envelope);
-        }
-        return;
-      }
       case "rtcAnswer":
         void this.webRtc.handleAnswer(message);
         return;
       case "rtcIceCandidate":
         void this.webRtc.handleCandidate(message);
         return;
-      case "pong":
-        this.handleWsPong(message.controllerSessionId, message.nonce);
-        return;
       case "error":
+        this.renderStatus("ERROR");
         this.log(`REMOTE ${message.code} / ${message.message}`);
         return;
       default:
@@ -596,120 +585,17 @@ export class RemoteManager {
     }
   }
 
-  private async requestConnectionMode(
-    mode: RemoteConnectionMode,
-  ): Promise<void> {
-    if (this.connectionMode === mode && this.ready) return;
-    this.adapter.releaseAllControllers();
-    if (!this.ready) {
-      await this.applyConnectionMode(mode);
-      return;
-    }
-    try {
-      const ack = await this.request({
-        v: 1,
-        type: "setConnectionMode",
-        requestId: crypto.randomUUID(),
-        mode,
-      });
-      if (!ack.ok)
-        throw new Error(ack.error ?? "Connection mode update failed");
-      await this.applyConnectionMode(mode);
-      this.log(`REMOTE MODE / ${this.modeLabel(mode)}`);
-    } catch (error) {
-      this.log(
-        `REMOTE ERROR / ${error instanceof Error ? error.message : "Connection mode update failed"}`,
-      );
-    }
-  }
-
-  /** server-authoritative modeをHost WebRTCとUIへ適用する */
-  private async applyConnectionMode(mode: RemoteConnectionMode): Promise<void> {
-    const generation = ++this.rtcConfigGeneration;
-    if (this.connectionMode !== mode) this.adapter.releaseAllControllers();
-    this.connectionMode = mode;
-    this.updateModeUi();
-    if (mode === "ws") {
-      this.webRtc.setMode("ws", []);
-      this.webRtcByController.clear();
-      this.renderConnectionSummary();
-      this.renderControllerState();
-      return;
-    }
-    try {
-      const iceServers = mode === "direct" ? [] : await this.getIceServers();
-      if (
-        generation !== this.rtcConfigGeneration ||
-        this.connectionMode !== mode
-      )
-        return;
-      this.webRtc.setMode(mode, this.controllers, iceServers);
-    } catch (error) {
-      if (generation !== this.rtcConfigGeneration) return;
-      this.webRtc.setMode("ws", []);
-      this.webRtcByController.clear();
-      this.log(
-        `REMOTE TURN ERROR / ${error instanceof Error ? error.message : "credential failed"}`,
-      );
-    }
-    this.renderConnectionSummary();
-    this.renderControllerState();
-  }
-
-  private async getIceServers(): Promise<RemoteIceServers> {
-    if (this.cachedIceServers) return this.cachedIceServers;
-    if (!this.session || !this.sessionTicket)
-      throw new Error("Remote session is not ready");
-    const response = await this.fetchImpl(
-      new URL(
-        `v1/rooms/${encodeURIComponent(this.session.roomId)}/ice-servers`,
-        this.withTrailingSlash(this.baseUrl),
-      ),
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${this.sessionTicket}` },
-      },
-    );
-    if (!response.ok)
-      throw new Error(`TURN credential failed (${response.status})`);
-    const parsed = iceServersResponseSchema.safeParse(await response.json());
-    if (!parsed.success) throw new Error("Invalid TURN credential response");
-    this.cachedIceServers = parsed.data.iceServers;
-    return this.cachedIceServers;
-  }
-
-  private async updatePermissionsFromUi(): Promise<void> {
-    const next: RemotePermissions = {
+  /** session開始前のpermissionだけをlocal stateへ反映する */
+  private updatePermissionsFromUi(): void {
+    if (this.session) return;
+    this.permissions = {
       cue: this.ui.permissionInputs.cue.checked,
       tapSync: this.ui.permissionInputs.tapSync.checked,
       record: this.ui.permissionInputs.record.checked,
       clear: this.ui.permissionInputs.clear.checked,
     };
-    if (!this.ready) {
-      this.permissions = next;
-      this.adapter.setPermissions(next);
-      return;
-    }
-    const previous = this.permissions;
-    this.permissions = next;
-    this.adapter.setPermissions(next);
-    try {
-      const ack = await this.request({
-        v: 1,
-        type: "setPermissions",
-        requestId: crypto.randomUUID(),
-        permissions: next,
-      });
-      if (!ack.ok) throw new Error(ack.error ?? "Permission update failed");
-      this.log("REMOTE PERMISSIONS UPDATED");
-    } catch (error) {
-      this.permissions = previous;
-      this.adapter.setPermissions(previous);
-      this.syncPermissionInputs();
-      this.log(
-        `REMOTE ERROR / ${error instanceof Error ? error.message : "Remote permission error"}`,
-      );
-    }
+    this.adapter.setPermissions(this.permissions);
+    this.renderPermissionSummary();
   }
 
   private request(
@@ -723,7 +609,7 @@ export class RemoteManager {
         reject(new Error("Remote ACK timeout"));
       }, 6_000);
       this.pendingRequests.set(message.requestId, { resolve, reject, timer });
-      if (!this.transport?.sendReliable(message)) {
+      if (!this.transport?.send(message)) {
         clearTimeout(timer);
         this.pendingRequests.delete(message.requestId);
         reject(new Error("Remote socket is not open"));
@@ -731,162 +617,71 @@ export class RemoteManager {
     });
   }
 
-  private waitUntilReady(): Promise<void> {
+  private waitUntilReady(timeoutMs = 8_000, transport?: RemoteTransport): Promise<void> {
     if (this.ready) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      const waiter: ReadyWaiter = { resolve, reject, timer: null };
+      const waiter: ReadyWaiter = { resolve, reject, timer: null, transport };
       waiter.timer = setTimeout(() => {
         this.readyWaiters.delete(waiter);
         reject(new Error("Remote connection timeout"));
-      }, 8_000);
+      }, timeoutMs);
       this.readyWaiters.add(waiter);
     });
   }
 
-  /** WS Relay利用中のcontrollerだけCloudflare経由RTTを測る */
-  private startPings(): void {
-    if (this.pingTimer !== null) return;
-    this.pingTimer = setInterval(() => {
-      if (!this.ready) return;
-      for (const controllerSessionId of this.controllers) {
-        const rtcConnected =
-          this.webRtcByController.get(controllerSessionId)?.connected === true;
-        if (
-          this.connectionMode !== "ws" &&
-          !(this.connectionMode === "auto" && !rtcConnected)
-        )
-          continue;
-        const nonce = crypto.randomUUID();
-        if (
-          this.transport?.sendRealtime({
-            v: 1,
-            type: "ping",
-            controllerSessionId,
-            nonce,
-          })
-        ) {
-          this.pendingPings.set(nonce, {
-            controllerSessionId,
-            sentAt: performance.now(),
-          });
-        }
-      }
-      const cutoff = performance.now() - 10_000;
-      for (const [nonce, ping] of this.pendingPings)
-        if (ping.sentAt < cutoff) this.pendingPings.delete(nonce);
-    }, 1_500);
-  }
-
-  private handleWsPong(controllerSessionId: string, nonce: string): void {
-    const ping = this.pendingPings.get(nonce);
-    if (!ping || ping.controllerSessionId !== controllerSessionId) return;
-    this.pendingPings.delete(nonce);
-    this.setLatency(
-      controllerSessionId,
-      Math.max(0, performance.now() - ping.sentAt),
-    );
-  }
-
-  private handleWebRtcLatency(
-    controllerSessionId: string,
-    rttMs: number,
-  ): void {
-    if (this.connectionMode === "ws") return;
-    this.setLatency(controllerSessionId, rttMs);
-  }
-
   private setLatency(controllerSessionId: string, rttMs: number): void {
     this.rttByController.set(controllerSessionId, rttMs);
-    this.transport?.sendRealtime({
-      v: 1,
-      type: "latency",
-      controllerSessionId,
-      rttMs,
-    });
     this.renderControllerState();
   }
 
   private handleWebRtcState(
     controllerSessionId: string,
     connected: boolean,
-    path: RemotePath,
   ): void {
-    this.webRtcByController.set(controllerSessionId, { connected, path });
-    if (!connected) this.adapter.releaseController(controllerSessionId);
+    this.webRtcByController.set(controllerSessionId, connected);
+    if (!connected) {
+      this.rttByController.delete(controllerSessionId);
+      this.adapter.releaseController(controllerSessionId);
+    }
     this.renderConnectionSummary();
     this.renderControllerState();
   }
 
   private renderControllerState(): void {
-    this.ui.count.textContent = String(this.controllers.size);
+    this.ui.count.textContent = `${this.controllers.size}/${REMOTE_CONTROLLER_LIMIT}`;
     if (this.controllers.size === 0) {
-      this.ui.stats.innerHTML = "<span>NO CONTROLLERS</span>";
+      this.ui.stats.hidden = true;
+      this.ui.stats.replaceChildren();
       return;
     }
+    this.ui.stats.hidden = false;
     this.ui.stats.replaceChildren(
       ...[...this.controllers].map((id, index) => {
         const row = document.createElement("div");
         const rtt = this.rttByController.get(id);
-        const rtc = this.webRtcByController.get(id);
-        const path = this.controllerPath(rtc);
-        row.innerHTML = `<b>#${index + 1}</b><span>${path}</span><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span><span>One-way ${rtt === undefined ? "—" : `~${Math.round(rtt / 2)} ms`}</span>`;
+        const state = this.webRtcByController.get(id);
+        const path = state === true ? "DIRECT" : state === false ? "接続失敗" : "接続中";
+        row.innerHTML = `<b>#${index + 1}</b><span>WebRTC (${path})</span><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span>`;
         return row;
       }),
     );
   }
 
-  private controllerPath(rtc?: ControllerWebRtcState): RemotePath {
-    if (this.connectionMode === "ws") return "WS RELAY";
-    if (this.connectionMode === "auto" && !rtc?.connected) return "WS RELAY";
-    return rtc?.path ?? "UNKNOWN";
-  }
-
   private renderConnectionSummary(): void {
-    const paths = [...this.controllers].map((id) =>
-      this.controllerPath(this.webRtcByController.get(id)),
-    );
-    const unique = new Set(paths);
-    const path =
-      unique.size === 0
-        ? this.connectionMode === "ws"
-          ? "WS RELAY"
-          : "UNKNOWN"
-        : unique.size === 1
-          ? paths[0]!
-          : "MIXED";
-    const anyRtc = [...this.webRtcByController.values()].some(
-      (state) => state.connected,
-    );
-    this.ui.webRtcStatus.textContent = `WebRTC ${anyRtc ? "CONNECTED" : "DISCONNECTED"}`;
-    this.ui.transport.textContent =
-      this.connectionMode === "ws"
-        ? "WebSocket"
-        : this.connectionMode === "auto"
-          ? anyRtc
-            ? "WebRTC / WS"
-            : "WebSocket"
-          : "WebRTC";
-    this.ui.path.textContent = path;
+    const anyRtc = [...this.webRtcByController.values()].some(Boolean);
+    const failed = [...this.webRtcByController.values()].some((connected) => !connected);
+    const state = anyRtc ? "DIRECT" : failed ? "接続失敗" : this.controllers.size > 0 ? "接続中" : "未接続";
+    this.ui.transport.textContent = state;
   }
 
-  private updateModeUi(): void {
-    const entries: Array<[HTMLButtonElement, RemoteConnectionMode]> = [
-      [this.ui.autoButton, "auto"],
-      [this.ui.directButton, "direct"],
-      [this.ui.turnButton, "turn"],
-      [this.ui.wsButton, "ws"],
-    ];
-    for (const [button, mode] of entries) {
-      const selected = this.connectionMode === mode;
-      button.classList.toggle("selected", selected);
-      button.setAttribute("aria-pressed", String(selected));
-    }
+  /** controller peerと表示用connection stateをまとめて破棄する */
+  private clearControllerConnections(): void {
+    this.webRtc.syncControllers([]);
+    this.controllers.clear();
+    this.rttByController.clear();
+    this.webRtcByController.clear();
     this.renderConnectionSummary();
-  }
-
-  private modeLabel(mode: RemoteConnectionMode): string {
-    if (mode === "ws") return "WS RELAY";
-    return mode.toUpperCase();
+    this.renderControllerState();
   }
 
   private syncPermissionInputs(): void {
@@ -894,14 +689,98 @@ export class RemoteManager {
     this.ui.permissionInputs.tapSync.checked = this.permissions.tapSync;
     this.ui.permissionInputs.record.checked = this.permissions.record;
     this.ui.permissionInputs.clear.checked = this.permissions.clear;
+    this.renderPermissionSummary();
+  }
+
+  /** 選択中permissionを折りたたみ見出しへ短く表示する */
+  private renderPermissionSummary(): void {
+    const labels = [
+      this.permissions.cue ? "CUE" : null,
+      this.permissions.tapSync ? "TAP" : null,
+      this.permissions.record ? "REC" : null,
+      this.permissions.clear ? "CLEAR" : null,
+    ].filter((label): label is string => label !== null);
+    this.ui.permissionSummary.textContent = labels.length > 0 ? labels.join(" · ") : "許可なし";
+  }
+
+  /** permission入力のsession中変更を防ぐ */
+  private setPermissionInputsDisabled(disabled: boolean): void {
+    for (const input of Object.values(this.ui.permissionInputs)) input.disabled = disabled;
+  }
+
+  /** Remote toggleのlabelと操作可否を同じ状態から描画する */
+  private renderRemoteToggle(active: boolean, busy = false): void {
+    this.ui.startButton.textContent = busy ? "……" : active ? "ON" : "OFF";
+    this.ui.startButton.disabled = busy || !this.baseUrl || this.destroyed;
+    this.ui.startButton.classList.toggle("active", active);
+    this.ui.startButton.setAttribute("aria-pressed", String(active));
+    this.ui.startButton.setAttribute("aria-label", active ? "Remoteを停止" : "Remoteを開始");
+    this.ui.sessionActions.hidden = !active;
+  }
+
+  /** Remote状態を記号と色へ統一して見出しへ表示する */
+  private renderStatus(status: string): void {
+    const state = status === "ONLINE"
+      ? "online"
+      : status === "OFFLINE"
+        ? "offline"
+        : status === "STARTING" || status === "AUTHENTICATING" || status === "RECONNECTING"
+          ? "pending"
+          : "error";
+    const mark = state === "online" ? "●" : state === "offline" ? "○" : state === "pending" ? "……" : "×";
+    this.ui.status.textContent = status === "STARTING" ? "(STARTING)" : `${mark} ${status}`;
+    this.ui.status.setAttribute("data-state", state);
   }
 
   private hideQrView(): void {
+    this.qrGeneration += 1;
+    this.clearQrTimers();
     this.joinVisible = false;
     this.ui.qrOverlay.hidden = true;
     this.ui.qrImage.removeAttribute("src");
-    this.ui.showQrButton.textContent = "SHOW QR";
+    this.ui.showQrButton.textContent = "QRを表示";
     this.ui.showQrButton.disabled = !this.ready;
+    this.ui.closeQrButton.disabled = false;
+    this.ui.qrProgress.max = this.qrTimeoutMs;
+    this.ui.qrProgress.value = this.qrTimeoutMs;
+    this.ui.qrCountdown.textContent = `残り${Math.ceil(this.qrTimeoutMs / 1_000)}秒`;
+  }
+
+  /** QR表示から固定時間後にJOINを閉じる */
+  private startQrExpiry(session: NonNullable<RemoteManager["session"]>): void {
+    this.clearQrTimers();
+    const expiresAt = Date.now() + this.qrTimeoutMs;
+    const render = (): void => {
+      const remaining = Math.max(0, expiresAt - Date.now());
+      this.ui.qrProgress.max = this.qrTimeoutMs;
+      this.ui.qrProgress.value = remaining;
+      this.ui.qrCountdown.textContent = `残り${Math.ceil(remaining / 1_000)}秒`;
+    };
+    render();
+    this.qrGaugeTimer = setInterval(render, 100);
+    this.qrExpiryTimer = setTimeout(() => this.expireQr(session), this.qrTimeoutMs);
+  }
+
+  /** 表示期限に達したQRを即時非表示にしてserver側JOINも閉じる */
+  private expireQr(session: NonNullable<RemoteManager["session"]>): void {
+    if (this.destroyed || this.session !== session || !this.joinVisible) return;
+    const closeRequest = this.ready && this.joinOpen
+      ? this.request({ v: 1, type: "closeJoin", requestId: crypto.randomUUID() })
+      : null;
+    this.joinOpen = false;
+    this.ui.join.textContent = "CLOSED";
+    this.hideQrView();
+    this.renderStatus("ONLINE");
+    this.log("REMOTE JOIN EXPIRED");
+    void closeRequest?.catch(() => undefined);
+  }
+
+  /** QR用intervalとtimeoutをまとめて解放する */
+  private clearQrTimers(): void {
+    if (this.qrGaugeTimer !== null) clearInterval(this.qrGaugeTimer);
+    if (this.qrExpiryTimer !== null) clearTimeout(this.qrExpiryTimer);
+    this.qrGaugeTimer = null;
+    this.qrExpiryTimer = null;
   }
 
   private rejectPending(message: string): void {
@@ -912,12 +791,34 @@ export class RemoteManager {
     this.pendingRequests.clear();
   }
 
-  private rejectReadyWaiters(message: string): void {
+  private rejectReadyWaiters(message: string, transport?: RemoteTransport): void {
     for (const waiter of this.readyWaiters) {
+      if (transport && waiter.transport !== transport) continue;
       if (waiter.timer !== null) clearTimeout(waiter.timer);
       waiter.reject(new Error(message));
+      this.readyWaiters.delete(waiter);
     }
-    this.readyWaiters.clear();
+  }
+
+  /** 現在transportだけを閉じて再接続の古いeventを無効化する */
+  private closeCurrentTransport(): void {
+    const transport = this.transport;
+    this.transport = null;
+    this.ready = false;
+    transport?.close();
+  }
+
+  /** 再接続の試行間隔をbackoffする */
+  private async waitForReconnect(delayMs: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  private isCurrentLifecycle(generation: number): boolean {
+    return !this.destroyed && this.lifecycleGeneration === generation;
+  }
+
+  private isCurrentQr(generation: number, session: NonNullable<RemoteManager["session"]>): boolean {
+    return !this.destroyed && this.qrGeneration === generation && this.session === session;
   }
 
   private withTrailingSlash(value: string): string {

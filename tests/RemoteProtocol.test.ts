@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isTerminalControllerClose,
-  parseRemoteEnvelopeMessage,
+  parseControllerRtcDataMessage,
+  parseHostRtcDataMessage,
   parseServerMessage,
   REMOTE_INITIAL_CONNECT_MAX_MS,
   REMOTE_SESSION_MAX_MS,
   remoteInitialConnectTimeoutMs,
   remoteSessionTimeoutMs,
 } from "../src/app/remote/RemoteProtocol.ts";
+import { createRemoteRtcConfiguration } from "../src/app/remote/WebRtcConfig.ts";
 
 test("二重接続と期限切れのclose codeでは再接続を止める", () => {
   assert.equal(isTerminalControllerClose(4002), true);
@@ -19,10 +21,20 @@ test("二重接続と期限切れのclose codeでは再接続を止める", () =
 });
 
 test("DataChannelでは検証済みRemoteEnvelopeだけを受け付ける", () => {
-  const valid = JSON.stringify({ v: 1, seq: 3, command: { type: "cue", cue: 9, state: "down" } });
-  assert.equal(parseRemoteEnvelopeMessage(valid)?.seq, 3);
-  assert.equal(parseRemoteEnvelopeMessage(JSON.stringify({ v: 1, seq: 3, command: { type: "cue", cue: 10, state: "down" } })), null);
-  assert.equal(parseRemoteEnvelopeMessage("x".repeat(1025)), null);
+  const valid = JSON.stringify({ v: 1, type: "remote", envelope: { v: 1, seq: 3, command: { type: "cue", cue: 9, state: "down" } } });
+  assert.equal(parseHostRtcDataMessage(valid)?.type, "remote");
+  assert.equal(parseHostRtcDataMessage(JSON.stringify({ v: 1, type: "remote", envelope: { v: 1, seq: 3, command: { type: "cue", cue: 10, state: "down" } } })), null);
+  assert.equal(parseHostRtcDataMessage("x".repeat(2049)), null);
+});
+
+test("RTTはHost側だけで計測してControllerへ返送しない", () => {
+  const nonce = crypto.randomUUID();
+  const ping = JSON.stringify({ v: 1, type: "ping", nonce });
+  const pong = JSON.stringify({ v: 1, type: "pong", nonce });
+  assert.equal(parseControllerRtcDataMessage(ping)?.type, "ping");
+  assert.equal(parseHostRtcDataMessage(pong)?.type, "pong");
+  assert.equal(parseHostRtcDataMessage(ping), null);
+  assert.equal(parseControllerRtcDataMessage(pong), null);
 });
 
 test("server signalingはcontroller identity付きschemaだけを受け付ける", () => {
@@ -30,6 +42,12 @@ test("server signalingはcontroller identity付きschemaだけを受け付ける
   const rtcSessionId = crypto.randomUUID();
   assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }))?.type, "rtcOffer");
   assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcAnswer", rtcSessionId, sdp: "v=0" })), null);
+});
+
+test("WebRTCはCloudflare STUNだけを使う直接接続に固定する", () => {
+  const configuration = createRemoteRtcConfiguration();
+  assert.equal(configuration.iceTransportPolicy, "all");
+  assert.deepEqual(configuration.iceServers, [{ urls: "stun:stun.cloudflare.com:3478" }]);
 });
 
 test("client時計が遅れていても再接続を1時間で止める", () => {

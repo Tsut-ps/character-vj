@@ -1,20 +1,13 @@
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = 1 as const;
-export const MAX_CLIENT_MESSAGE_BYTES = 1024;
-export const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
+const MAX_CLIENT_MESSAGE_BYTES = 1024;
+const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
 export const SESSION_TICKET_TTL_MS = 60 * 60 * 1000;
 export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
-export const MAX_CONTROLLER_SESSIONS = 200;
-export const MAX_ACTIVE_CONTROLLERS = 100;
-export const MAX_ROOM_COMMANDS_PER_SECOND = 600;
+export const MAX_CONTROLLERS = 20;
+export const JOIN_TIMEOUT_MS = 30_000;
 export const MAX_HOST_MESSAGES_PER_SECOND = 300;
 export const MAX_HOST_CONTROL_MESSAGES_PER_MINUTE = 30;
-
-const cueSchema = z.union([
-  z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5),
-  z.literal(6), z.literal(7), z.literal(8), z.literal(9),
-]);
 
 export const permissionsSchema = z.object({
   cue: z.boolean(),
@@ -32,30 +25,9 @@ export const DEFAULT_PERMISSIONS: Permissions = {
   clear: false,
 };
 
-export const connectionModeSchema = z.enum(["auto", "direct", "turn", "ws"]);
-export type ConnectionMode = z.infer<typeof connectionModeSchema>;
-export const DEFAULT_CONNECTION_MODE: ConnectionMode = "auto";
-
-export const remoteCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("cue"), cue: cueSchema, state: z.enum(["down", "up"]), latch: z.boolean().optional() }).strict(),
-  z.object({ type: z.literal("tap") }).strict(),
-  z.object({ type: z.literal("sync") }).strict(),
-  z.object({ type: z.literal("record") }).strict(),
-  z.object({ type: z.literal("clear") }).strict(),
-]);
-
-export const remoteEnvelopeSchema = z.object({
-  v: z.literal(PROTOCOL_VERSION),
-  seq: z.number().int().nonnegative().safe(),
-  command: remoteCommandSchema,
-}).strict();
-
-export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
-export type RemoteEnvelope = z.infer<typeof remoteEnvelopeSchema>;
-
 const rtcSdpSchema = z.string().min(1).max(20_000);
 const rtcSessionIdSchema = z.string().uuid();
-export const rtcIceCandidateSchema = z.object({
+const rtcIceCandidateSchema = z.object({
   candidate: z.string().max(4_096),
   sdpMid: z.string().max(256).nullable().optional(),
   sdpMLineIndex: z.number().int().nonnegative().max(65_535).nullable().optional(),
@@ -90,30 +62,17 @@ const hostRtcCandidateSchema = z.object({
 }).strict();
 
 export const controllerMessageSchema = z.union([
-  remoteEnvelopeSchema,
-  z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.string().uuid() }).strict(),
   controllerRtcAnswerSchema,
   controllerRtcCandidateSchema,
 ]);
 
 export const hostMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("activateJoin") }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("setPermissions"), requestId: z.string().uuid(), permissions: permissionsSchema }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("setConnectionMode"), requestId: z.string().uuid(), mode: connectionModeSchema }).strict(),
-  z.object({ v: z.literal(1), type: z.literal("requestState"), requestId: z.string().uuid() }).strict(),
   hostRtcOfferSchema,
   hostRtcCandidateSchema,
-  z.object({ v: z.literal(1), type: z.literal("ping"), controllerSessionId: z.string().uuid(), nonce: z.string().uuid() }).strict(),
-  z.object({
-    v: z.literal(1),
-    type: z.literal("latency"),
-    controllerSessionId: z.string().uuid(),
-    rttMs: z.number().finite().nonnegative().max(60_000),
-  }).strict(),
 ]);
-
-export type HostMessage = z.infer<typeof hostMessageSchema>;
 
 export const signalingMessageSchema = z.union([
   controllerRtcAnswerSchema,
@@ -122,6 +81,7 @@ export const signalingMessageSchema = z.union([
   hostRtcCandidateSchema,
 ]);
 
+export const createRoomRequestSchema = z.object({ permissions: permissionsSchema }).strict();
 export const joinRequestSchema = z.object({ joinSecret: z.string().min(32).max(256) }).strict();
 export const hostTicketRequestSchema = z.object({ hostToken: z.string().min(32).max(256) }).strict();
 export const roomIdSchema = z.string().uuid();
@@ -136,19 +96,4 @@ export function payloadWithinLimit(text: string): boolean {
 
 export function signalingPayloadWithinLimit(text: string): boolean {
   return new TextEncoder().encode(text).byteLength <= MAX_SIGNALING_MESSAGE_BYTES;
-}
-
-export function sequenceIsFresh(seq: number, lastSeq: number): boolean {
-  return Number.isSafeInteger(seq) && seq >= 0 && seq > lastSeq;
-}
-
-export function isCommandAllowed(command: RemoteCommand, permissions: Permissions): boolean {
-  switch (command.type) {
-    case "cue": return permissions.cue;
-    case "tap":
-    case "sync": return permissions.tapSync;
-    case "record": return permissions.record;
-    case "clear": return permissions.clear;
-  }
-  return false;
 }

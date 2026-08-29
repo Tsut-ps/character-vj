@@ -2,7 +2,7 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, createSecretToken, hashToken } from "../src/auth";
 import type { Room } from "../src/Room";
-import { MAX_CONTROLLER_SESSIONS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
+import { DEFAULT_PERMISSIONS, MAX_CONTROLLERS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
 
 interface Fixture {
   roomId: string;
@@ -23,19 +23,21 @@ async function createFixture(ttlMs = 60_000): Promise<Fixture> {
     await hashToken(hostToken),
     await hashToken(hostTicket),
     expiresAt,
+    DEFAULT_PERMISSIONS,
   );
   expect(initialized).toBe(true);
   return { roomId, hostToken, hostTicket, expiresAt, stub };
 }
 
 /** test専用にjoin stateを直接設定してsecret lifecycleを検証可能にする */
-async function setJoin(stub: DurableObjectStub<Room>, open: boolean, secret?: string): Promise<void> {
+async function setJoin(stub: DurableObjectStub<Room>, open: boolean, secret?: string, expiresAt = Date.now() + 30_000): Promise<void> {
   const secretHash = secret ? await hashToken(secret) : null;
   await runInDurableObject(stub, (_instance, state) => {
     state.storage.sql.exec(
-      "UPDATE room_state SET join_open = ?, join_secret_hash = ? WHERE singleton = 1",
+      "UPDATE room_state SET join_open = ?, join_secret_hash = ?, join_expires_at = ? WHERE singleton = 1",
       open ? 1 : 0,
       secretHash,
+      open ? expiresAt : null,
     );
   });
 }
@@ -63,6 +65,17 @@ describe("Room secret and ticket lifecycle", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("保存permission破損時は全操作を拒否する", async () => {
+    const fixture = await createFixture();
+    const secret = createSecretToken();
+    await setJoin(fixture.stub, true, secret);
+    await runInDurableObject(fixture.stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE room_state SET permissions_json = ? WHERE singleton = 1", "invalid");
+    });
+    const result = await fixture.stub.joinWithSecret(secret, await hashToken(createSecretToken()), crypto.randomUUID(), fixture.expiresAt);
+    expect(result).toEqual({ ok: false, reason: "forbidden" });
+  });
+
   it("secretローテーション後に古いQRを拒否する", async () => {
     const fixture = await createFixture();
     const oldSecret = createSecretToken();
@@ -82,6 +95,24 @@ describe("Room secret and ticket lifecycle", () => {
     await setJoin(fixture.stub, false);
     const result = await fixture.stub.joinWithSecret(secret, await hashToken(createSecretToken()), crypto.randomUUID(), Date.now() + 60_000);
     expect(result.ok).toBe(false);
+  });
+
+  it("表示から30秒を過ぎたQRをserver側でも拒否する", async () => {
+    const fixture = await createFixture();
+    const secret = createSecretToken();
+    await setJoin(fixture.stub, true, secret, Date.now() - 1);
+    const result = await fixture.stub.joinWithSecret(secret, await hashToken(createSecretToken()), crypto.randomUUID(), fixture.expiresAt);
+    expect(result).toEqual({ ok: false, reason: "forbidden" });
+    await runInDurableObject(fixture.stub, async (_instance, state) => {
+      await state.storage.setAlarm(Date.now());
+    });
+    await runDurableObjectAlarm(fixture.stub);
+    await runInDurableObject(fixture.stub, (_instance, state) => {
+      const room = state.storage.sql.exec<{ join_open: number; join_secret_hash: string | null; join_expires_at: number | null }>(
+        "SELECT join_open, join_secret_hash, join_expires_at FROM room_state WHERE singleton = 1",
+      ).one();
+      expect(room).toEqual({ join_open: 0, join_secret_hash: null, join_expires_at: null });
+    });
   });
 
   it("session ticketなしと別room token流用を拒否する", async () => {
@@ -200,13 +231,8 @@ describe("Room secret and ticket lifecycle", () => {
     const secret = createSecretToken();
     await setJoin(fixture.stub, true, secret);
     await runInDurableObject(fixture.stub, (_instance, state) => {
-      for (let index = 0; index < MAX_CONTROLLER_SESSIONS; index += 1) {
+      for (let index = 0; index < MAX_CONTROLLERS; index += 1) {
         const sessionId = crypto.randomUUID();
-        state.storage.sql.exec(
-          "INSERT INTO controllers (session_id, last_seq, current_connection_id, created_at) VALUES (?, -1, NULL, ?)",
-          sessionId,
-          Date.now(),
-        );
         state.storage.sql.exec(
           "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'controller', ?, ?)",
           `ticket-${index}`,

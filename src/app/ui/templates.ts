@@ -53,22 +53,26 @@ export const CONTROL_PANEL_HTML = `
   <div class="slots"></div>
   <div class="effects"></div>
   <section class="remote-controls" aria-label="Remote controller settings">
-    <div class="remote-head"><strong>REMOTE</strong><span data-remote-status>OFFLINE</span></div>
-    <div class="remote-count">Controllers: <b data-remote-count>0</b></div>
-    <div class="remote-count">Join: <b data-remote-join>CLOSED</b></div>
-    <button data-action="start-remote" class="remote-start">START REMOTE</button>
-    <button data-action="show-qr" class="remote-show" disabled>SHOW QR</button>
-    <div class="remote-connection"><span>CONNECTION</span><div><button class="selected" data-remote-connection="auto" aria-pressed="true">AUTO</button><button data-remote-connection="direct" aria-pressed="false">DIRECT</button><button data-remote-connection="turn" aria-pressed="false">TURN</button><button data-remote-connection="ws" aria-pressed="false">WS RELAY</button></div></div>
-    <div class="remote-webrtc-status" data-remote-webrtc-status>WebRTC DISCONNECTED</div>
-    <fieldset>
-      <legend>AUDIENCE ALLOW</legend>
-      <label><input data-remote-permission="cue" type="checkbox" checked> CUE 1–9</label>
-      <label><input data-remote-permission="tapSync" type="checkbox"> TAP / SYNC</label>
-      <label><input data-remote-permission="record" type="checkbox"> RECORD</label>
-      <label><input data-remote-permission="clear" type="checkbox"> CLEAR</label>
-    </fieldset>
-    <div class="remote-transport"><span>Transport</span><b data-remote-transport>WebSocket</b><span>Path</span><b data-remote-path>WS RELAY</b></div>
-    <div class="remote-stats" data-remote-stats><span>NO CONTROLLERS</span></div>
+    <div class="remote-head">
+      <div class="remote-title"><strong>REMOTE</strong><span data-remote-status data-state="offline">○ OFFLINE</span></div>
+      <span class="remote-count"><b data-remote-count>0/20</b></span>
+      <button data-action="start-remote" class="remote-toggle" aria-pressed="false">OFF</button>
+    </div>
+    <div class="remote-session-actions" data-remote-session-actions hidden>
+      <button data-action="show-qr" class="remote-show" disabled>QRを表示</button>
+      <span class="remote-join">参加 <b data-remote-join>CLOSED</b></span>
+    </div>
+    <div class="remote-stats" data-remote-stats hidden></div>
+    <details class="remote-permissions">
+      <summary><span>操作許可</span><b data-remote-permission-summary>CUE</b></summary>
+      <fieldset>
+        <label><input data-remote-permission="cue" type="checkbox" checked> CUE 1–9</label>
+        <label><input data-remote-permission="tapSync" type="checkbox"> TAP / SYNC</label>
+        <label><input data-remote-permission="record" type="checkbox"> RECORD</label>
+        <label><input data-remote-permission="clear" type="checkbox"> CLEAR</label>
+      </fieldset>
+    </details>
+    <div class="remote-tech"><span>WebRTC Direct</span><b data-remote-transport>未接続</b></div>
   </section>
   <div class="panel-actions">
     <button data-action="record">REC [R]</button>
@@ -94,6 +98,7 @@ export const REMOTE_QR_HTML = `
     <p>Scan to join as an audience controller</p>
     <img data-remote-qr alt="Character VJ controller QR code">
     <small data-remote-room></small>
+    <div class="remote-qr-expiry"><progress data-remote-qr-progress max="30000" value="30000"></progress><span data-remote-qr-countdown>残り30秒</span></div>
     <div data-remote-qr-status>OPENING JOIN…</div>
   </div>
 `;
