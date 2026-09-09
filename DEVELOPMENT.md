@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-`http://localhost:5173/character-vj-vite/` を開きます
+`http://localhost:5173/character-vj/` を開きます
 
 ### リモート機能を含めて起動する
 

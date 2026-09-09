@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  base: '/character-vj-vite/',
+  base: '/character-vj/',
   build: {
     rollupOptions: {
       input: {
