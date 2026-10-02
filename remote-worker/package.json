@@ -10,7 +10,7 @@
     "test": "vitest run --configLoader runner"
   },
   "dependencies": {
-    "hono": "4.13.2",
+    "hono": "4.13.7",
     "hono-party": "2.1.0",
     "partyserver": "0.5.10",
     "zod": "4.4.3"
@@ -19,7 +19,7 @@
     "@cloudflare/vitest-pool-workers": "0.21.3",
     "@cloudflare/workers-types": "5.20260814.1",
     "typescript": "~6.0.2",
-    "vitest": "4.1.10",
+    "vitest": "5.0.0",
     "wrangler": "4.123.0"
   },
   "overrides": {
