@@ -48,6 +48,37 @@ describe("Worker edge security", () => {
     expect({ status: response.status, body: await response.text() }).toEqual({ status: 426, body: "Upgrade Required" });
   });
 
+  it("先頭`//`でguardを迂回したHTTP requestをDO到達前に拒否する", async () => {
+    const roomId = crypto.randomUUID();
+    for (const path of [`//parties/room/${roomId}`, `//parties//room/${roomId}`, `/parties/room/${roomId}`]) {
+      const response = await SELF.fetch(`https://worker.test${path}`);
+      expect([426, 404]).toContain(response.status);
+      expect(await response.text()).not.toBe("Not implemented");
+    }
+    const bypass = await SELF.fetch(`https://worker.test//parties/room/${roomId}`);
+    expect(bypass.status).toBe(404);
+  });
+
+  it("クライアント指定の接続ID(_pk)を拒否する", async () => {
+    const created = await SELF.fetch("https://worker.test/v1/rooms", {
+      method: "POST",
+      headers: { Origin: "https://tsut-ps.github.io", "content-type": "application/json" },
+      body: JSON.stringify({ permissions: DEFAULT_PERMISSIONS }),
+    });
+    const { roomId, sessionTicket } = await created.json<{ roomId: string; sessionTicket: string }>();
+    const headers = {
+      Origin: "https://tsut-ps.github.io",
+      Upgrade: "websocket",
+      "Sec-WebSocket-Protocol": `cvj-ticket.${sessionTicket}`,
+    };
+    const rejected = await SELF.fetch(`https://worker.test/parties/room/${roomId}?_pk=victim`, { headers });
+    expect(rejected.status).not.toBe(101);
+    const accepted = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers });
+    expect(accepted.status).toBe(101);
+    accepted.webSocket?.accept();
+    accepted.webSocket?.close();
+  });
+
   it("tokenを返すv1 responseをcache禁止にする", async () => {
     const response = await SELF.fetch("https://worker.test/v1/rooms", {
       method: "POST",

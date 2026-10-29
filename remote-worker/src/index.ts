@@ -196,8 +196,12 @@ app.post("/v1/rooms/:roomId/join", async (c) => {
 /** OriginとticketをUpgrade前に検証してserver-side identityへ置換する */
 app.use("*", partyserverMiddleware<AppEnv>({
   options: {
+    // Roomはfetchを使わないため、先頭`//`などでguardを迂回したHTTPもDO到達前に閉じる
+    onBeforeRequest: () => new Response("Not Found", { status: 404 }),
     onBeforeConnect: async (request, lobby, c) => {
       if (lobby.className !== "Room" || !roomIdSchema.safeParse(lobby.name).success) return new Response("Not Found", { status: 404 });
+      // 接続IDはserverが採番し、クライアント指定の重複でRoomを壊させない
+      if (new URL(request.url).searchParams.has("_pk")) return new Response("Bad Request", { status: 400 });
       if (!originAllowed(request, c.env)) return new Response("Forbidden Origin", { status: 403 });
       const ticket = sessionTicketFromRequest(request);
       if (!ticket) return new Response("Missing session ticket", { status: 401 });
