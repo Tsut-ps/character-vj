@@ -4,6 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-11",
   "compatibility_flags": ["nodejs_compat"],
+  // バージョンごとのプレビュー URL は出さない
+  "preview_urls": false,
   "vars": {
     "ALLOWED_ORIGINS": "https://tsut-ps.github.io"
   },
