@@ -10,10 +10,10 @@
     "test": "vitest run --configLoader runner"
   },
   "dependencies": {
-    "hono": "4.13.2",
+    "hono": "4.13.14",
     "hono-party": "2.1.0",
     "partyserver": "0.5.10",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.3",
